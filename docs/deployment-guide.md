@@ -152,8 +152,8 @@ Or set via config:
 ```bash
 # In ~/.hermes/profiles/creative-worker/config.yaml
 model:
-  default: nemotron-30b-nvfp4
-  provider: custom:local-inference
+  default: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+  provider: local-vllm
   base_url: http://127.0.0.1:30000/v1
   api_key: local
 ```
