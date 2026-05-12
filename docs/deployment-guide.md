@@ -47,36 +47,9 @@ nvidia-smi
 
 ## Phase 2: Inference Backend
 
-### Option A: vLLM (Recommended)
+### Option A: vLLM (Recommended for GB10)
 
-vLLM with Marlin backend is tested and production-ready on GB10 (SM121).
-SGLang is experimental — see Option B.
-
-```bash
-# Pull the image
-docker pull lmsysorg/sglang:latest
-
-# Start with SM121-optimized settings
-docker run -d --name sglang \
-    --runtime nvidia --gpus all \
-    -p 30000:30000 \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
-    -e FLASHINFER_CUDA_ARCH_LIST=12.1f \
-    lmsysorg/sglang:latest \
-    --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 \
-    --mem-fraction-static 0.70 \
-    --max-model-len 32768 \
-    --trust-remote-code \
-    --quantization modelopt_fp4 \
-    --port 30000 --host 0.0.0.0 --enforce-eager
-```
-
-Or use docker-compose:
-```bash
-docker compose -f config/vllm/docker-compose.yml up -d
-```
-
-### Option A: vLLM (Recommended)
+vLLM with Marlin backend is the canonical tested path on GB10 (SM121). Keep the memory cap; omitting it can hard-freeze the machine.
 
 ```bash
 # Set Marlin backend (CRITICAL for SM121 — CUTLASS FP4 is broken)
@@ -84,7 +57,6 @@ export VLLM_USE_FLASHINFER_MOE_FP4=0
 export VLLM_NVFP4_GEMM_BACKEND=marlin
 export VLLM_TEST_FORCE_FP8_MARLIN=1
 
-# Launch vLLM server
 python3 -m vllm.entrypoints.openai.api_server \
   --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 \
   --served-model-name nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 \
@@ -104,8 +76,12 @@ python3 -m vllm.entrypoints.openai.api_server \
 > **Warning:** SGLang's `sgl_kernel` has no prebuilt SM121 binaries.
 > This requires building from source with CUDA 13. Use vLLM for production.
 
-### Option C: Ollama (Easiest)
+```bash
+# Experimental only; prefer vLLM above on GB10.
+docker compose -f config/sglang/docker-compose.yml up -d
+```
 
+### Option C: Ollama (Easiest)
 ```bash
 # Install
 curl -fsSL https://ollama.com/install.sh | sh

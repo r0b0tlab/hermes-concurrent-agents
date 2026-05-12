@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
@@ -39,7 +38,11 @@ sleep 5
 info "Killing sessions..."
 echo "$SESSIONS" | while read -r line; do
     sess=$(echo "$line" | cut -d: -f1)
-    tmux kill-session -t "$sess" 2>/dev/null && ok "Killed $sess" || warn "Already gone: $sess"
+    if tmux kill-session -t "$sess" 2>/dev/null; then
+        ok "Killed $sess"
+    else
+        warn "Already gone: $sess"
+    fi
 done
 
 echo ""

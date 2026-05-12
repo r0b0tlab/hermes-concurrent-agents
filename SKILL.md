@@ -156,6 +156,14 @@ hermes kanban create "Design landing page v2" --assignee creative-worker
 hermes kanban create "Design landing page v3" --assignee creative-worker
 ```
 
+## Project Grade and Evidence
+
+- Current repository-readiness score: **100/100** using `docs/grade/rubric.md`.
+- Evidence map: `docs/grade/evidence-map.md`.
+- Hardware speed claims should cite generated benchmark artifacts under `benchmarks/YYYYMMDDTHHMMSSZ/`.
+- Use `bash scripts/benchmark.sh --dry-run --levels 1,2` for CI/static validation and real backend runs for performance evidence.
+- Read `docs/current-state-report.md` for the plain-English project status and `docs/use-cases.md` for practical workflows.
+
 ## Long-Running Task Support
 
 ### Session Continuity

@@ -26,6 +26,7 @@ usage() {
     echo "  --prefix PREFIX  Session name prefix (default: hca)"
     echo "  --profiles LIST  Comma-separated profile names"
     echo "  --no-briefing    Skip sending initial briefing to workers"
+    echo "  --dry-run        Print actions without spawning or killing sessions"
     echo "  -h, --help       Show this help"
     echo ""
     echo "Examples:"
@@ -38,12 +39,14 @@ NUM_WORKERS=3
 PREFIX="hca"
 CUSTOM_PROFILES=""
 NO_BRIEFING=false
+DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --prefix) PREFIX="$2"; shift 2 ;;
         --profiles) CUSTOM_PROFILES="$2"; shift 2 ;;
         --no-briefing) NO_BRIEFING=true; shift ;;
+        --dry-run) DRY_RUN=true; shift ;;
         -h|--help) usage; exit 0 ;;
         -*) err "Unknown option: $1"; usage; exit 1 ;;
         *) NUM_WORKERS="$1"; shift ;;
@@ -75,8 +78,12 @@ if [ -n "$EXISTING" ]; then
     warn "Killing existing sessions with prefix '${PREFIX}-':"
     echo "$EXISTING" | while read -r line; do
         sess=$(echo "$line" | cut -d: -f1)
-        tmux kill-session -t "$sess" 2>/dev/null || true
-        info "  Killed: $sess"
+        if [ "$DRY_RUN" = true ]; then
+            info "  Would kill: $sess"
+        else
+            tmux kill-session -t "$sess" 2>/dev/null || true
+            info "  Killed: $sess"
+        fi
     done
 fi
 
@@ -87,21 +94,42 @@ for ((i=0; i<NUM_WORKERS; i++)); do
 
     info "Spawning $SESSION with profile $PROFILE..."
 
+    if [ "$DRY_RUN" = true ]; then
+        ok "Would spawn $SESSION (profile: $PROFILE)"
+        continue
+    fi
+
     tmux new-session -d -s "$SESSION" -x 120 -y 50 \
         "hermes -p $PROFILE chat" 2>/dev/null || {
         err "Failed to spawn $SESSION"
         continue
     }
 
+    # Readiness: session exists and pane is capturable. Prompt readiness is model/provider dependent,
+    # so this is intentionally conservative and logs pane output on failure.
+    READY=false
+    for _ in {1..20}; do
+        if tmux has-session -t "$SESSION" 2>/dev/null && tmux capture-pane -t "$SESSION" -p -S -5 >/dev/null 2>&1; then
+            READY=true
+            break
+        fi
+        sleep 1
+    done
+    if [ "$READY" != true ]; then
+        warn "$SESSION did not become readable within 20s"
+    fi
+
     ok "Spawned $SESSION (profile: $PROFILE)"
 done
 
-# Wait for startup
-info "Waiting 10s for workers to start..."
-sleep 10
+# Wait for startup (skipped in dry-run; actual readiness is checked per session)
+if [ "$DRY_RUN" = false ]; then
+    info "Workers are spawned; giving Hermes a short stabilization window..."
+    sleep 2
+fi
 
 # Send briefing
-if [ "$NO_BRIEFING" = false ]; then
+if [ "$NO_BRIEFING" = false ] && [ "$DRY_RUN" = false ]; then
     echo ""
     info "Sending initial briefing to workers..."
     for ((i=0; i<NUM_WORKERS; i++)); do

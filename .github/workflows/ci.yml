@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install optional shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Bash syntax
+        run: bash -n setup.sh scripts/*.sh
+      - name: ShellCheck
+        run: shellcheck setup.sh scripts/*.sh
+      - name: Docs validation
+        run: bash scripts/validate-docs.sh
+      - name: Benchmark dry run
+        run: bash scripts/benchmark.sh --dry-run --levels 1,2 --output-dir /tmp/hca-bench
+      - name: Kanban smoke dry run
+        run: bash scripts/smoke-kanban-flow.sh --dry-run
+      - name: Fault injection dry run
+        run: bash scripts/fault-injection-test.sh
