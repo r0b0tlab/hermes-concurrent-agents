@@ -16,7 +16,7 @@ metadata:
 
 Run multiple Hermes Agent workers concurrently on a single machine with unified memory (NVIDIA GB10/DGX Spark, Apple Silicon M-series) to maximize total tokens-per-second across parallelizable tasks.
 
-**Key insight:** On unified-memory hardware, a sparse MoE model (like Nemotron 3 Nano 30B-A3B) running with continuous batching can serve 4-6 concurrent agents at ~2.5-3x the throughput of a single agent — because the GPU processes a batch of requests more efficiently than individual ones.
+**Key insight:** On unified-memory hardware, a sparse MoE model (like Nemotron 3 Nano 30B-A3B) running with continuous batching can serve 3-6 concurrent agents at ~3x the throughput of a single agent. Tested on GB10: 3 agents = 69 tok/s total (23 each) vs 23 tok/s solo.
 
 ## When to Use This Skill
 
@@ -31,7 +31,7 @@ Run multiple Hermes Agent workers concurrently on a single machine with unified 
 ┌─────────────────────────────────────────────────────────┐
 │  Unified Memory GPU (128GB)                              │
 │  ┌─────────────────────────────────────────────────┐    │
-│  │  Inference Backend (SGLang/vLLM/Ollama)         │    │
+│  │  Inference Backend (vLLM/SGLang/Ollama)         │    │
 │  │  Continuous batching, PagedAttention, MPS        │    │
 │  └──────────────────────┬──────────────────────────┘    │
 │                         │ OpenAI-compatible API          │
@@ -58,7 +58,11 @@ cd hermes-concurrent-agents
 # Run setup (creates profiles, configures inference backend reference)
 bash setup.sh
 
-# If you have a local inference backend already running:
+# 4. Start inference backend (vLLM + Marlin for GB10):
+export VLLM_NVFP4_GEMM_BACKEND=marlin
+export VLLM_USE_FLASHINFER_MOE_FP4=0
+
+# 5. Spawn workers:
 bash scripts/spawn.sh 3        # spawn 3 workers
 bash scripts/benchmark.sh      # benchmark concurrency 1-6
 bash scripts/health-monitor.sh # watch GPU/memory
@@ -67,7 +71,7 @@ bash scripts/health-monitor.sh # watch GPU/memory
 ## Prerequisites
 
 1. **Hermes Agent installed** — `curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`
-2. **Inference backend running** — SGLang, vLLM, or Ollama serving a model on localhost
+2. **Inference backend running** — vLLM (recommended), SGLang (experimental), or Ollama on localhost
 3. **tmux installed** — `apt install tmux` or `brew install tmux`
 
 ## Worker Profiles
@@ -182,11 +186,11 @@ The goal is **peak total tok/s**, not 100% GPU utilization:
 
 | Concurrency | Expected Total TPS | Per-Agent TPS | Notes |
 |-------------|-------------------|---------------|-------|
-| 1 | ~35 tok/s | 35 | Baseline |
-| 2 | ~55-60 | 28-30 | ~1.6x total |
-| 4 | ~80-95 | 20-24 | ~2.5x total (sweet spot) |
-| 6 | ~90-110 | 15-18 | ~3x total, diminishing returns |
-| 8 | ~85-100 | 11-13 | KV cache pressure, may degrade |
+| 1 | ~23 tok/s | 23 | Baseline (tested on GB10) |
+| 2 | ~46 | ~23 | ~2x total |
+| 3 | ~69 | ~23 | ~3x total (tested, sweet spot) |
+| 4 | ~80-95 | 20-24 | ~3.5x total (estimated) |
+| 6 | ~90-110 | 15-18 | ~4x total, diminishing returns |
 
 ### Memory Budget (128GB unified)
 ```
@@ -196,10 +200,14 @@ OS + agents:       ~15-20 GB
 Buffer:            ~10-15 GB  ← don't skip this
 ```
 
-### Key Flags
-- `--mem-fraction-static 0.70` — leave 30% for OS and agents (not 0.85)
-- `--max-model-len 32768` — reasonable context, not 256k
-- MPS daemon for GPU sharing without MIG partitioning
+**Key Flags (vLLM + Marlin)**
+- `VLLM_NVFP4_GEMM_BACKEND=marlin` — CRITICAL: CUTLASS FP4 broken on SM121
+- `VLLM_USE_FLASHINFER_MOE_FP4=0` — disable broken FlashInfer FP4 path
+- `--gpu-memory-utilization 0.70` — leave 30% for OS and agents
+- `--max-model-len 65536` — 64K context (Hermes minimum)
+- `--max-num-seqs 16` — concurrent request limit
+- `--kv-cache-dtype fp8` — halve KV cache memory
+- `--moe-backend marlin` — force Marlin MoE backend
 
 ## Scripts
 
@@ -232,7 +240,9 @@ model:
 
 1. **Running at 100% GPU memory** — always leave 20-30% headroom for OS, agents, and KV cache spikes
 2. **Not using MPS** — without MPS, CUDA context switching kills throughput
-3. **SM120 kernels on SM121 hardware** — 78% perf loss. Use SM121-compiled containers.
+3. **SGLang sgl_kernel on SM121** — no prebuilt sm121 binaries. Use vLLM.
+4. **CUTLASS FP4 on SM121** — lacks tcgen05 tensor cores. Set VLLM_NVFP4_GEMM_BACKEND=marlin.
+5. **No GPU memory cap** — always set --gpu-memory-utilization 0.70 or system freezes.
 4. **Shared file writes** — two agents writing the same file = corruption. Use kanban to coordinate.
 5. **Context explosion** — agents re-sending history bloats KV cache. Enforce SOUL.md rules.
 6. **No crash recovery** — always use `--continue` and enable checkpoints.
@@ -244,7 +254,7 @@ model:
 - **Hardware:** NVIDIA GB10, DGX Spark, Apple Silicon M-series, any unified-memory GPU
 - **OS:** Linux (primary), macOS (secondary)
 - **Hermes Agent:** v2.0+ (profiles, kanban, delegation)
-- **Inference backends:** SGLang (preferred), vLLM, Ollama, llama.cpp
+- **Inference backends:** vLLM (recommended), SGLang (experimental on SM121), Ollama, llama.cpp
 - **Models:** Any OpenAI-compatible API. Optimized for MoE sparse models (30B-A3B, 8B active).
 
 ## Links

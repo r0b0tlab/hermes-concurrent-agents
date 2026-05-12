@@ -1,14 +1,16 @@
-# vLLM with SM121-optimized NVFP4 for GB10/DGX Spark
-# Alternative to SGLang — vLLM uses PagedAttention for memory efficiency
+# vLLM with Marlin NVFP4 backend for GB10/DGX Spark (SM121)
+# Tested on GB10 with vLLM 0.20.1 + Marlin backend
+#
+# CUTLASS FP4 is BROKEN on SM121 (lacks tcgen05 tensor cores).
+# Marlin dequantizes FP4->BF16 on-the-fly: 50 tok/s, zero errors.
 #
 # Usage: docker compose up -d
 # Verify: curl http://localhost:8000/v1/models
 
 services:
   vllm:
-    image: avarok/vllm-nvfp4-gb10-sm120:v14
+    image: vllm/vllm-openai:latest
     container_name: vllm-concurrent
-    runtime: nvidia
     deploy:
       resources:
         reservations:
@@ -21,15 +23,23 @@ services:
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
     environment:
-      - FLASHINFER_CUDA_ARCH_LIST=12.1f
+      - VLLM_USE_FLASHINFER_MOE_FP4=0
+      - VLLM_NVFP4_GEMM_BACKEND=marlin
+      - VLLM_TEST_FORCE_FP8_MARLIN=1
     command: >
       --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
-      --gpu-memory-utilization 0.70
-      --max-model-len 32768
-      --trust-remote-code
-      --quantization modelopt_fp4
-      --port 8000
+      --served-model-name nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
       --host 0.0.0.0
+      --port 8000
+      --trust-remote-code
+      --enforce-eager
+      --gpu-memory-utilization 0.70
+      --max-model-len 65536
+      --max-num-seqs 16
+      --kv-cache-dtype fp8
+      --moe-backend marlin
+      --tool-call-parser qwen3_coder
+      --enable-auto-tool-choice
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]
       interval: 30s

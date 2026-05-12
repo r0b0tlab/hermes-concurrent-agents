@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# WARNING: SGLang is EXPERIMENTAL on GB10 (SM121).
+# sgl_kernel has no prebuilt sm121 binaries — requires building from source with CUDA 13.
+# Use vLLM config (config/vllm/) instead for production.
+# See: https://github.com/sgl-project/sglang/issues/11658
+
 # Launch SGLang inference backend for concurrent agents
 # Alternative to docker-compose for direct docker run
 

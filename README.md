@@ -10,7 +10,7 @@ Run multiple [Hermes Agent](https://github.com/NousResearch/hermes-agent) worker
 ┌─────────────────────────────────────────────────────────┐
 │  Unified Memory GPU (128GB)                              │
 │  ┌─────────────────────────────────────────────────┐    │
-│  │  Inference Backend (SGLang / vLLM / Ollama)     │    │
+│  │  Inference Backend (vLLM / SGLang / Ollama)     │    │
 │  │  Continuous batching + PagedAttention + MPS      │    │
 │  └──────────────────────┬──────────────────────────┘    │
 │                         │ OpenAI-compatible API          │
@@ -40,8 +40,11 @@ cd hermes-concurrent-agents
 # 3. Run setup (creates profiles, initializes kanban)
 bash setup.sh
 
-# 4. Start your inference backend (example: SGLang)
-docker compose -f config/sglang/docker-compose.yml up -d
+# 4. Start your inference backend (vLLM + Marlin for GB10)
+# See config/vllm/docker-compose.yml or launch directly:
+export VLLM_NVFP4_GEMM_BACKEND=marlin
+export VLLM_USE_FLASHINFER_MOE_FP4=0
+export VLLM_TEST_FORCE_FP8_MARLIN=1
 
 # 5. Spawn workers
 bash scripts/spawn.sh 3
@@ -58,7 +61,7 @@ hermes kanban create "Write story chapter 1" --assignee creative-worker
 |-------------|-----|
 | **Hermes Agent v2.0+** | Profiles, kanban, delegation |
 | **tmux** | Worker session isolation |
-| **Inference backend** | SGLang, vLLM, or Ollama serving a model |
+| **Inference backend** | vLLM (recommended), SGLang (experimental), or Ollama |
 | **Unified-memory GPU** | GB10, DGX Spark, Apple Silicon (or any GPU with enough VRAM) |
 
 ## Worker Profiles
@@ -142,24 +145,28 @@ The goal is **peak total tok/s per dollar**, not 100% GPU utilization.
 
 | Concurrency | Total TPS | Per-Agent | Notes |
 |-------------|-----------|-----------|-------|
-| 1 | ~35 | 35 | Baseline |
-| 2 | ~55-60 | 28-30 | 1.6x total |
-| 4 | ~80-95 | 20-24 | **2.5x total (sweet spot)** |
-| 6 | ~90-110 | 15-18 | 3x total, diminishing returns |
-| 8 | ~85-100 | 11-13 | KV cache pressure |
+| 1 | ~23 | 23 | Baseline (tested on GB10) |
+| 2 | ~46 | ~23 | 2x total |
+| 3 | ~69 | ~23 | **3x total (tested, sweet spot)** |
+| 4 | ~80-95 | 20-24 | 3.5x total (estimated) |
+| 6 | ~90-110 | 15-18 | 4x total, diminishing returns |
 
 **Memory budget (128GB unified):**
 ```
-Model weights (NVFP4):  25-40 GB
-KV cache (shared):      40-60 GB
-OS + agents:            15-20 GB
-Buffer (don't skip):    10-15 GB
+Model weights (NVFP4):  ~19 GB
+KV cache (FP8, 64K):    ~66 GB
+OS + agents:            ~27 GB
+Buffer (don't skip):    ~16 GB
 ```
 
-**Key flags:**
-- `--mem-fraction-static 0.70` — leave 30% headroom, not 15%
-- `--max-model-len 32768` — reasonable context, not 256k
-- Enable MPS daemon for GPU sharing
+**Key flags (vLLM + Marlin):**
+- `VLLM_NVFP4_GEMM_BACKEND=marlin` — CRITICAL: CUTLASS FP4 broken on SM121
+- `VLLM_USE_FLASHINFER_MOE_FP4=0` — disable broken FlashInfer FP4 path
+- `--gpu-memory-utilization 0.70` — leave 30% headroom
+- `--max-model-len 65536` — 64K context (Hermes minimum)
+- `--max-num-seqs 16` — concurrent request limit
+- `--kv-cache-dtype fp8` — halve KV cache memory
+- `--moe-backend marlin` — force Marlin MoE backend
 
 ## Scripts
 
@@ -204,7 +211,9 @@ model:
 |---------|-----|
 | Running at 100% GPU memory | Leave 20-30% headroom |
 | No MPS daemon | Enable for concurrent CUDA sharing |
-| SM120 kernels on SM121 | Use SM121-compiled containers (78% perf loss otherwise) |
+| SGLang sgl_kernel on SM121 | Use vLLM — sgl_kernel has no sm121 binaries |
+| CUTLASS FP4 on SM121 | Set VLLM_NVFP4_GEMM_BACKEND=marlin — lacks tcgen05 tensor cores |
+| No GPU memory cap | Always set --gpu-memory-utilization 0.70 or system freezes |
 | Two agents writing same file | Coordinate via kanban |
 | Context explosion | Enforce SOUL.md disk-first rules |
 | No crash recovery | Always use `--continue` + checkpoints |

@@ -1,3 +1,8 @@
+# WARNING: SGLang is EXPERIMENTAL on GB10 (SM121).
+# sgl_kernel has no prebuilt sm121 binaries — requires building from source with CUDA 13.
+# Use vLLM config (config/vllm/) instead for production.
+# See: https://github.com/sgl-project/sglang/issues/11658
+#
 # SGLang with SM121-optimized NVFP4 for GB10/DGX Spark
 # Usage: docker compose up -d
 #

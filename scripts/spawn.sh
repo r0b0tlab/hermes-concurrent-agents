@@ -88,7 +88,7 @@ for ((i=0; i<NUM_WORKERS; i++)); do
     info "Spawning $SESSION with profile $PROFILE..."
 
     tmux new-session -d -s "$SESSION" -x 120 -y 50 \
-        "hermes -p $PROFILE --continue" 2>/dev/null || {
+        "hermes -p $PROFILE chat" 2>/dev/null || {
         err "Failed to spawn $SESSION"
         continue
     }

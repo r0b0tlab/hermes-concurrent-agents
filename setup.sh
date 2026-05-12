@@ -72,6 +72,14 @@ for profile in "${WORKER_PROFILES[@]}"; do
     else
         warn "No SOUL.md template found for $profile at $SOUL_SRC"
     fi
+
+    # Apply config template
+    CONFIG_SRC="$PROFILES_DIR/../config/profile-template.yaml"
+    CONFIG_DST="$HOME/.hermes/profiles/$profile/config.yaml"
+    if [ -f "$CONFIG_SRC" ]; then
+        cp "$CONFIG_SRC" "$CONFIG_DST"
+        ok "Applied config template for $profile"
+    fi
 done
 
 # --- Initialize Kanban ---

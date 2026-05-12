@@ -4,9 +4,13 @@ Step-by-step guide to deploying concurrent Hermes agents on unified-memory hardw
 
 ## Phase 1: Hardware Setup
 
-### Enable MPS (NVIDIA Multi-Process Service)
+### Enable MPS (Optional)
 
-MPS lets multiple CUDA workloads share the GPU without hard partitioning. This is critical for concurrent inference.
+> **Note:** MPS is NOT required when using vLLM's built-in continuous batching.
+> vLLM handles concurrent requests natively. Skip this section unless you have
+> a specific need for CUDA-level multi-process sharing.
+
+MPS lets multiple CUDA workloads share the GPU without hard partitioning.
 
 ```bash
 # Start MPS daemon
@@ -43,9 +47,10 @@ nvidia-smi
 
 ## Phase 2: Inference Backend
 
-### Option A: SGLang (Recommended for Multi-Agent)
+### Option A: vLLM (Recommended)
 
-SGLang has RadixAttention which reuses KV cache when agents share system prompts.
+vLLM with Marlin backend is tested and production-ready on GB10 (SM121).
+SGLang is experimental — see Option B.
 
 ```bash
 # Pull the image
@@ -68,14 +73,36 @@ docker run -d --name sglang \
 
 Or use docker-compose:
 ```bash
-docker compose -f config/sglang/docker-compose.yml up -d
-```
-
-### Option B: vLLM
-
-```bash
 docker compose -f config/vllm/docker-compose.yml up -d
 ```
+
+### Option A: vLLM (Recommended)
+
+```bash
+# Set Marlin backend (CRITICAL for SM121 — CUTLASS FP4 is broken)
+export VLLM_USE_FLASHINFER_MOE_FP4=0
+export VLLM_NVFP4_GEMM_BACKEND=marlin
+export VLLM_TEST_FORCE_FP8_MARLIN=1
+
+# Launch vLLM server
+python3 -m vllm.entrypoints.openai.api_server \
+  --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 \
+  --served-model-name nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 \
+  --host 0.0.0.0 --port 8000 \
+  --trust-remote-code --enforce-eager \
+  --gpu-memory-utilization 0.70 \
+  --max-model-len 65536 --max-num-seqs 16 \
+  --kv-cache-dtype fp8 --moe-backend marlin \
+  --tool-call-parser qwen3_coder --enable-auto-tool-choice
+
+# Or use docker compose:
+# docker compose -f config/vllm/docker-compose.yml up -d
+```
+
+### Option B: SGLang (Experimental on GB10)
+
+> **Warning:** SGLang's `sgl_kernel` has no prebuilt SM121 binaries.
+> This requires building from source with CUDA 13. Use vLLM for production.
 
 ### Option C: Ollama (Easiest)
 
@@ -93,10 +120,10 @@ ollama pull nemotron:30b-a3b-nvfp4
 
 ```bash
 # Check models endpoint
-curl http://localhost:30000/v1/models
+curl http://localhost:8000/v1/models
 
 # Test inference
-curl http://localhost:30000/v1/chat/completions \
+curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{"model":"nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4","messages":[{"role":"user","content":"Say hello in one sentence."}]}'
 ```
@@ -189,7 +216,7 @@ nvidia-smi -l 5
 bash scripts/shutdown.sh
 
 # Stop inference backend
-docker stop sglang-concurrent
+docker stop vllm-concurrent
 
 # Stop MPS
 sudo nvidia-cuda-mps-control -q
