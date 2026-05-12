@@ -257,6 +257,16 @@ model:
 - **Inference backends:** vLLM (recommended), SGLang (experimental on SM121), Ollama, llama.cpp
 - **Models:** Any OpenAI-compatible API. Optimized for MoE sparse models (30B-A3B, 8B active).
 
+## Durability test
+
+The orchestrator pattern was tested against a 20-requirement spec (CLI todo app). The orchestrator:
+1. Spawned 3 subagents concurrently via `delegate_task`
+2. Reviewed all output against the spec
+3. Rewrote non-compliant code
+4. Verified all 20 requirements pass before writing PASS verdict
+
+Wall time: ~11 minutes. 3 concurrent subagents. No human intervention after initial dispatch.
+
 ## Links
 
 - [Research Report](references/research-report-summary.md) — full analysis of GB10 concurrent throughput
