@@ -48,8 +48,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if ! command -v hermes >/dev/null 2>&1; then echo "hermes not found" >&2; exit 1; fi
-if ! command -v python3 >/dev/null 2>&1; then echo "python3 not found" >&2; exit 1; fi
+if [[ "$DRY_RUN" != true ]]; then
+  if ! command -v hermes >/dev/null 2>&1; then echo "hermes not found" >&2; exit 1; fi
+  if ! command -v python3 >/dev/null 2>&1; then echo "python3 not found" >&2; exit 1; fi
+fi
 
 echo "[smoke] board=$BOARD dry_run=$DRY_RUN"
 if [[ "$DRY_RUN" == true ]]; then
