@@ -1,0 +1,39 @@
+# vLLM with SM121-optimized NVFP4 for GB10/DGX Spark
+# Alternative to SGLang — vLLM uses PagedAttention for memory efficiency
+#
+# Usage: docker compose up -d
+# Verify: curl http://localhost:8000/v1/models
+
+services:
+  vllm:
+    image: avarok/vllm-nvfp4-gb10-sm120:v14
+    container_name: vllm-concurrent
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - FLASHINFER_CUDA_ARCH_LIST=12.1f
+    command: >
+      --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+      --gpu-memory-utilization 0.70
+      --max-model-len 32768
+      --trust-remote-code
+      --quantization modelopt_fp4
+      --port 8000
+      --host 0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped

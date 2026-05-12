@@ -1,0 +1,47 @@
+# SGLang with SM121-optimized NVFP4 for GB10/DGX Spark
+# Usage: docker compose up -d
+#
+# Prerequisites:
+#   - NVIDIA GPU with unified memory (GB10, DGX Spark)
+#   - nvidia-container-toolkit installed
+#   - Model downloaded to HF cache (~/.cache/huggingface)
+#
+# After starting, verify:
+#   curl http://localhost:30000/v1/models
+#   curl http://localhost:30000/v1/chat/completions -d '{"model":"nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4","messages":[{"role":"user","content":"hello"}]}'
+
+services:
+  sglang:
+    image: lmsysorg/sglang:latest
+    container_name: sglang-concurrent
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ports:
+      - "30000:30000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - FLASHINFER_CUDA_ARCH_LIST=12.1f
+      - CUDA_VISIBLE_DEVICES=0
+    command: >
+      --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+      --mem-fraction-static 0.70
+      --max-model-len 32768
+      --trust-remote-code
+      --quantization modelopt_fp4
+      --port 30000
+      --host 0.0.0.0
+      --enforce-eager
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:30000/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped

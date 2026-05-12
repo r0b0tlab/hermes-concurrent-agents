@@ -1,0 +1,40 @@
+# Template config.yaml for worker profiles
+# Copy to ~/.hermes/profiles/<worker-name>/config.yaml
+#
+# This file overrides the default profile config.
+# Only include sections you want to change.
+
+# Model configuration
+# Point to your local inference backend
+model:
+  default: nemotron-30b-nvfp4
+  provider: custom:local-inference
+  base_url: http://127.0.0.1:30000/v1  # SGLang default port
+  api_key: local
+
+# Agent settings for long-running tasks
+agent:
+  max_turns: 500            # High limit for complex tasks
+  gateway_timeout: 7200     # 2 hours per turn
+  api_max_retries: 5        # Retry on transient failures
+  tool_use_enforcement: auto
+
+# Enable filesystem checkpoints for crash recovery
+checkpoints:
+  enabled: true
+  max_snapshots: 20
+  max_total_size_mb: 500
+  auto_prune: true
+
+# Context compression to prevent bloat
+compression:
+  enabled: true
+  threshold: 0.50
+  target_ratio: 0.20
+  protect_last_n: 20
+
+# Terminal settings
+terminal:
+  backend: local
+  timeout: 300              # 5 min per command
+  cwd: .
