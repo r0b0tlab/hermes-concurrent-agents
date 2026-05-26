@@ -50,19 +50,9 @@ export HCA_MODEL_NAME=your-served-model-name
 docker compose -f config/vllm/docker-compose.yml up -d
 ```
 
-### Option B: MiniMax M2.7 NVFP4 demo path
+### Option B: Other OpenAI-compatible servers
 
-For the local MiniMax M2.7 NVFP4 agent-team demo, use the dedicated guide:
-
-```bash
-less docs/mm27-gb10-demo.md
-```
-
-That path targets the optimized FlashInfer-CUTLASS runtime and keeps separate setup scripts/profiles so the public demo is not confused with other model recipes.
-
-### Option C: Ollama / llama.cpp / other OpenAI-compatible servers
-
-Any server is usable if it exposes OpenAI-compatible chat completions:
+Any local server that exposes `/v1/chat/completions` works. Ollama, llama.cpp, SGLang, etc.:
 
 ```bash
 export HCA_ENDPOINT=http://127.0.0.1:11434/v1
@@ -115,14 +105,6 @@ bash scripts/verify-local-only.sh \
 bash scripts/spawn.sh 3
 bash scripts/status.sh
 ```
-
-For an OBS-friendly single tmux session with named panes for a project demo:
-
-```bash
-bash scripts/spawn-mm27-demo.sh --session local-team-demo --prefix mm27 --workspace /tmp/local-team-demo
-```
-
-The spawn script name is MM2.7-oriented, but the tmux layout pattern is usable with any profile prefix.
 
 ## Phase 6: Create Tasks
 

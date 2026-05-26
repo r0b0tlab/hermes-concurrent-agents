@@ -13,7 +13,7 @@ usage(){
 Usage: verify-local-only.sh [OPTIONS]
 
 Verify Hermes worker profiles are configured for a local OpenAI-compatible
-endpoint only. This is the public-demo guard for "fully local agent team" claims.
+endpoint only. This is the guard for "fully local agent team" claims.
 
 Options:
   --profiles CSV   Profiles to inspect

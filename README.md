@@ -240,7 +240,6 @@ model:
 - [Use Cases](docs/use-cases.md) — practical examples for research, coding, docs, benchmarks, review, and content production
 - [Deployment Guide](docs/deployment-guide.md) — step-by-step setup
 - [Benchmarking Guide](docs/benchmarking.md) — measured concurrency sweeps and artifact bundles, including throughput, memory, power, utilization, and thermal samples
-- [`demos/mm27-local-agent-team/`](demos/mm27-local-agent-team/) — OBS-friendly local project-completion demo where an orchestrator assigns, reviews, accepts, and rejects worker tasks.
 - [Durability Tests](docs/durability-tests.md) — smoke/fault-injection validation
 - [Tuning Guide](docs/tuning-guide.md) — performance optimization
 - [Workflow Patterns](docs/workflow-patterns.md) — detailed examples
