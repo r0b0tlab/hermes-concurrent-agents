@@ -27,12 +27,31 @@ USAGE
 }
 
 ENDPOINT="http://127.0.0.1:8000/v1"
-MODEL="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4"
+MODEL="${HCA_MODEL_NAME:-local-model}"
 LEVELS="1,2,3,4,6"
 PROMPT="Write a detailed 500-word analysis of the benefits and risks of autonomous AI agents in software development. Include specific examples."
 OUT_PARENT="benchmarks"
 TIMEOUT=300
 DRY_RUN=false
+
+sample_gpu(){
+  local out="$1"
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=timestamp,name,temperature.gpu,power.draw,utilization.gpu,memory.used,memory.total \
+      --format=csv,noheader,nounits > "$out" 2>/dev/null || true
+  fi
+}
+
+gpu_sampler(){
+  local out="$1" interval="${2:-1}"
+  : > "$out"
+  while true; do
+    sample_gpu /tmp/hca-gpu-sample.$$
+    cat /tmp/hca-gpu-sample.$$ >> "$out" 2>/dev/null || true
+    rm -f /tmp/hca-gpu-sample.$$
+    sleep "$interval"
+  done
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -78,12 +97,18 @@ if [[ "$DRY_RUN" == false ]]; then
   fi
 fi
 
-printf "level,total_elapsed_s,requests,successes,failures,prompt_tokens,completion_tokens,total_tokens,total_tps\n" > "$OUT_DIR/summary.csv"
+printf "level,total_elapsed_s,requests,successes,failures,prompt_tokens,completion_tokens,total_tokens,total_tps,pre_max_temp_c,post_max_temp_c,run_max_temp_c,pre_avg_power_w,post_avg_power_w,run_avg_power_w,pre_avg_gpu_util_pct,post_avg_gpu_util_pct,run_avg_gpu_util_pct,run_max_mem_used_mb\n" > "$OUT_DIR/summary.csv"
 
 for level in "${LEVEL_ARRAY[@]}"; do
   info "Level $level"
   LEVEL_DIR="$OUT_DIR/raw/level-$level"
   mkdir -p "$LEVEL_DIR"
+  sample_gpu "$OUT_DIR/logs/level-${level}-gpu-before.csv"
+  SAMPLER_PID=""
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    gpu_sampler "$OUT_DIR/logs/level-${level}-gpu-samples.csv" 1 &
+    SAMPLER_PID="$!"
+  fi
   START=$(python3 - <<'PY'
 import time; print(time.time())
 PY
@@ -130,14 +155,45 @@ PY
     if ! wait "$pid"; then failures=$((failures + 1)); fi
   done
 
+  if [[ -n "$SAMPLER_PID" ]]; then
+    kill "$SAMPLER_PID" >/dev/null 2>&1 || true
+    wait "$SAMPLER_PID" 2>/dev/null || true
+  fi
+  sample_gpu "$OUT_DIR/logs/level-${level}-gpu-after.csv"
   END=$(python3 - <<'PY'
 import time; print(time.time())
 PY
 )
   python3 - "$OUT_DIR" "$level" "$START" "$END" "$failures" <<'PY'
-import csv, glob, json, os, sys
+import csv, glob, json, os, statistics, sys
 out_dir, level, start, end, failures = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]), int(sys.argv[5])
 responses = sorted(glob.glob(os.path.join(out_dir, "raw", f"level-{level}", "response-*.json")))
+
+def gpu_stats(path):
+    rows = []
+    if not os.path.exists(path):
+        return {}
+    for line in open(path, encoding="utf-8"):
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 7:
+            continue
+        def num(x):
+            try: return float(x)
+            except Exception: return None
+        rows.append({"timestamp": parts[0], "name": parts[1], "temp_c": num(parts[2]), "power_w": num(parts[3]), "util_pct": num(parts[4]), "mem_used_mb": num(parts[5]), "mem_total_mb": num(parts[6])})
+    vals = lambda key: [r[key] for r in rows if r.get(key) is not None]
+    return {
+        "gpus": rows,
+        "max_temp_c": max(vals("temp_c"), default=None),
+        "avg_power_w": statistics.fmean(vals("power_w")) if vals("power_w") else None,
+        "avg_gpu_util_pct": statistics.fmean(vals("util_pct")) if vals("util_pct") else None,
+        "mem_used_mb": max(vals("mem_used_mb"), default=None),
+        "mem_total_mb": sum(vals("mem_total_mb")) if vals("mem_total_mb") else None,
+    }
+
+pre_gpu = gpu_stats(os.path.join(out_dir, "logs", f"level-{level}-gpu-before.csv"))
+post_gpu = gpu_stats(os.path.join(out_dir, "logs", f"level-{level}-gpu-after.csv"))
+run_gpu = gpu_stats(os.path.join(out_dir, "logs", f"level-{level}-gpu-samples.csv"))
 prompt = completion = total = successes = 0
 records = []
 for path in responses:
@@ -157,11 +213,19 @@ for path in responses:
         records.append({"path": path, "error": str(exc)})
 elapsed = max(end - start, 0.001)
 tps = total / elapsed if total else 0.0
-summary = {"level": level, "elapsed_s": elapsed, "requests": level, "successes": successes, "failures": failures, "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total, "total_tps": tps, "responses": records}
+summary = {"level": level, "elapsed_s": elapsed, "requests": level, "successes": successes, "failures": failures, "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total, "total_tps": tps, "gpu_before": pre_gpu, "gpu_after": post_gpu, "gpu_during": run_gpu, "responses": records}
 with open(os.path.join(out_dir, f"level-{level}.json"), "w", encoding="utf-8") as f:
     json.dump(summary, f, indent=2)
+def fmt(v):
+    return "" if v is None else f"{v:.3f}" if isinstance(v, float) else v
 with open(os.path.join(out_dir, "summary.csv"), "a", encoding="utf-8", newline="") as f:
-    csv.writer(f).writerow([level, f"{elapsed:.3f}", level, successes, failures, prompt, completion, total, f"{tps:.3f}"])
+    csv.writer(f).writerow([
+        level, f"{elapsed:.3f}", level, successes, failures, prompt, completion, total, f"{tps:.3f}",
+        fmt(pre_gpu.get("max_temp_c")), fmt(post_gpu.get("max_temp_c")), fmt(run_gpu.get("max_temp_c")),
+        fmt(pre_gpu.get("avg_power_w")), fmt(post_gpu.get("avg_power_w")), fmt(run_gpu.get("avg_power_w")),
+        fmt(pre_gpu.get("avg_gpu_util_pct")), fmt(post_gpu.get("avg_gpu_util_pct")), fmt(run_gpu.get("avg_gpu_util_pct")),
+        fmt(run_gpu.get("mem_used_mb")),
+    ])
 PY
 done
 
@@ -177,7 +241,7 @@ with open(os.path.join(out, "metrics.json"), "w", encoding="utf-8") as f:
 with open(os.path.join(out, "README.md"), "w", encoding="utf-8") as f:
     f.write("# Benchmark Artifact Bundle\n\n")
     f.write("Generated by `scripts/benchmark.sh`.\n\n")
-    f.write("Files:\n- `env.txt` environment manifest\n- `summary.csv` level summary\n- `metrics.json` combined JSON metrics\n- `raw/` request/response JSON\n- `logs/` per-worker logs\n")
+    f.write("Files:\n- `env.txt` environment manifest\n- `summary.csv` level summary with throughput, power, utilization, memory, and thermal columns\n- `metrics.json` combined JSON metrics\n- `raw/` request/response JSON\n- `logs/` per-worker logs plus per-level GPU before/during/after samples\n")
 PY
 
 ok "Benchmark complete: $OUT_DIR"

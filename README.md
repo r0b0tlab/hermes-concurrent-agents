@@ -2,9 +2,9 @@
 
 > **By [@mr-r0b0t on X](https://x.com/mr_r0b0t) — [r0b0tlab](https://github.com/r0b0tlab)**
 
-Run multiple [Hermes Agent](https://github.com/NousResearch/hermes-agent) workers concurrently on a single machine with unified memory (NVIDIA GB10/DGX Spark, Apple Silicon M-series) to maximize total tokens-per-second across parallelizable tasks.
+Run multiple [Hermes Agent](https://github.com/NousResearch/hermes-agent) workers concurrently on one local OpenAI-compatible model endpoint. Works with the model of your choice: MiniMax M2.7 NVFP4, Qwen, Nemotron, Llama, Ollama models, or any endpoint that exposes `/v1/chat/completions`.
 
-**Why this works:** On unified-memory hardware, a sparse Mixture-of-Experts model (like Nemotron 3 Nano 30B-A3B) with continuous batching serves 4-6 concurrent agents at **2.5-3x** the throughput of a single agent. The GPU processes batches more efficiently than individual requests.
+**Why this works:** agent work is naturally parallel. A single loaded local model server can continuously batch requests from several Hermes workers, so a team can research, code, write, and verify at the same time. Sparse MoE models often benefit the most, but the orchestration pattern is model-agnostic.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -37,19 +37,22 @@ curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scri
 git clone https://github.com/r0b0tlab/hermes-concurrent-agents.git
 cd hermes-concurrent-agents
 
-# 3. Run setup (creates profiles, initializes kanban)
-bash setup.sh
+# 3. Choose your local model/backend
+export HCA_ENDPOINT=http://127.0.0.1:8000/v1
+export HCA_MODEL_NAME=your-served-model-name
+# The model name must match your backend's /v1/models id.
 
-# 4. Start your inference backend (vLLM + Marlin for GB10)
-# See config/vllm/docker-compose.yml or launch directly:
-export VLLM_NVFP4_GEMM_BACKEND=marlin
-export VLLM_USE_FLASHINFER_MOE_FP4=0
-export VLLM_TEST_FORCE_FP8_MARLIN=1
+# 4. Run setup (creates profiles, initializes kanban, writes model config)
+bash setup.sh --model "$HCA_MODEL_NAME" --endpoint "$HCA_ENDPOINT" --force
 
-# 5. Spawn workers
+# 5. Verify backend and local-only profile config
+bash scripts/check-backend.sh --endpoint "$HCA_ENDPOINT" --model "$HCA_MODEL_NAME"
+bash scripts/verify-local-only.sh --endpoint "$HCA_ENDPOINT" --model "$HCA_MODEL_NAME"
+
+# 6. Spawn workers
 bash scripts/spawn.sh 3
 
-# 6. Send tasks via kanban
+# 7. Send tasks via kanban
 hermes kanban create "Research topic A" --assignee research-worker
 hermes kanban create "Build API endpoint" --assignee coder-worker
 hermes kanban create "Write story chapter 1" --assignee creative-worker
@@ -167,14 +170,11 @@ OS + agents:            ~27 GB
 Buffer (don't skip):    ~16 GB
 ```
 
-**Key flags (vLLM + Marlin):**
-- `VLLM_NVFP4_GEMM_BACKEND=marlin` — CRITICAL: CUTLASS FP4 broken on SM121
-- `VLLM_USE_FLASHINFER_MOE_FP4=0` — disable broken FlashInfer FP4 path
+**Key flags (generic local backend):**
 - `--gpu-memory-utilization 0.70` — leave 30% headroom
 - `--max-model-len 65536` — 64K context (Hermes minimum)
 - `--max-num-seqs 16` — concurrent request limit
 - `--kv-cache-dtype fp8` — halve KV cache memory
-- `--moe-backend marlin` — force Marlin MoE backend
 
 ## Scripts
 
@@ -208,9 +208,9 @@ model:
 
 # creative-worker: high-quality for generation
 model:
-  default: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
-  provider: custom:local-vllm
-  base_url: http://127.0.0.1:30000/v1
+  default: your-served-model-name
+  provider: local-vllm
+  base_url: http://127.0.0.1:8000/v1
 ```
 
 ## Pitfalls
@@ -220,7 +220,7 @@ model:
 | Running at 100% GPU memory | Leave 20-30% headroom |
 | No MPS daemon | Enable for concurrent CUDA sharing |
 | SGLang sgl_kernel on SM121 | Use vLLM — sgl_kernel has no sm121 binaries |
-| CUTLASS FP4 on SM121 | Set VLLM_NVFP4_GEMM_BACKEND=marlin — lacks tcgen05 tensor cores |
+| Backend-specific kernels | Use the launch flags required by your chosen model/runtime; do not copy another model family's kernel flags blindly. |
 | No GPU memory cap | Always set --gpu-memory-utilization 0.70 or system freezes |
 | Two agents writing same file | Coordinate via kanban |
 | Context explosion | Enforce SOUL.md disk-first rules |
@@ -239,7 +239,8 @@ model:
 - [Current State Report](docs/current-state-report.md) — plain-English status, architecture, validation, and next steps
 - [Use Cases](docs/use-cases.md) — practical examples for research, coding, docs, benchmarks, review, and content production
 - [Deployment Guide](docs/deployment-guide.md) — step-by-step setup
-- [Benchmarking Guide](docs/benchmarking.md) — measured concurrency sweeps and artifact bundles
+- [Benchmarking Guide](docs/benchmarking.md) — measured concurrency sweeps and artifact bundles, including throughput, memory, power, utilization, and thermal samples
+- [`demos/mm27-local-agent-team/`](demos/mm27-local-agent-team/) — OBS-friendly local project-completion demo where an orchestrator assigns, reviews, accepts, and rejects worker tasks.
 - [Durability Tests](docs/durability-tests.md) — smoke/fault-injection validation
 - [Tuning Guide](docs/tuning-guide.md) — performance optimization
 - [Workflow Patterns](docs/workflow-patterns.md) — detailed examples

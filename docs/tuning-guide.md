@@ -97,7 +97,7 @@ model:
 
 # creative-worker: big model
 model:
-  default: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+  default: your-served-model-name
   provider: custom:local-vllm
   base_url: http://127.0.0.1:30000/v1
 ```

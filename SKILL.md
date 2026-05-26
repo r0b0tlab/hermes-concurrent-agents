@@ -14,9 +14,9 @@ metadata:
 
 # Hermes Concurrent Agents
 
-Run multiple Hermes Agent workers concurrently on a single machine with unified memory (NVIDIA GB10/DGX Spark, Apple Silicon M-series) to maximize total tokens-per-second across parallelizable tasks.
+Run multiple Hermes Agent workers concurrently on one local OpenAI-compatible model endpoint. Works with the model of your choice: MiniMax M2.7 NVFP4, Qwen, Nemotron, Llama, Ollama models, or any endpoint that exposes `/v1/chat/completions`.
 
-**Key insight:** On unified-memory hardware, a sparse MoE model (like Nemotron 3 Nano 30B-A3B) running with continuous batching can serve 3-6 concurrent agents at ~3x the throughput of a single agent. Tested on GB10: 3 agents = 69 tok/s total (23 each) vs 23 tok/s solo.
+**Key insight:** a single local OpenAI-compatible backend can serve multiple isolated Hermes profiles at once. Use any model whose context window and tool-calling behavior fit your task; then benchmark your own hardware before making throughput claims.
 
 ## When to Use This Skill
 
@@ -58,9 +58,10 @@ cd hermes-concurrent-agents
 # Run setup (creates profiles, configures inference backend reference)
 bash setup.sh
 
-# 4. Start inference backend (vLLM + Marlin for GB10):
-export VLLM_NVFP4_GEMM_BACKEND=marlin
-export VLLM_USE_FLASHINFER_MOE_FP4=0
+# 4. Choose your local model/backend:
+export HCA_ENDPOINT=http://127.0.0.1:8000/v1
+export HCA_MODEL_NAME=your-served-model-name
+bash setup.sh --model "$HCA_MODEL_NAME" --endpoint "$HCA_ENDPOINT" --force
 
 # 5. Spawn workers:
 bash scripts/spawn.sh 3        # spawn 3 workers
@@ -208,14 +209,11 @@ OS + agents:       ~15-20 GB
 Buffer:            ~10-15 GB  ← don't skip this
 ```
 
-**Key Flags (vLLM + Marlin)**
-- `VLLM_NVFP4_GEMM_BACKEND=marlin` — CRITICAL: CUTLASS FP4 broken on SM121
-- `VLLM_USE_FLASHINFER_MOE_FP4=0` — disable broken FlashInfer FP4 path
+**Key Flags (generic local backend)**
 - `--gpu-memory-utilization 0.70` — leave 30% for OS and agents
 - `--max-model-len 65536` — 64K context (Hermes minimum)
 - `--max-num-seqs 16` — concurrent request limit
 - `--kv-cache-dtype fp8` — halve KV cache memory
-- `--moe-backend marlin` — force Marlin MoE backend
 
 ## Scripts
 
@@ -239,18 +237,17 @@ model:
 
 # creative-worker config (high-quality for generation)
 model:
-  default: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
-  provider: custom:local-vllm
-  base_url: http://127.0.0.1:30000/v1
+  default: your-served-model-name
+  provider: local-vllm
+  base_url: http://127.0.0.1:8000/v1
 ```
 
 ## Pitfalls
 
 1. **Running at 100% GPU memory** — always leave 20-30% headroom for OS, agents, and KV cache spikes
 2. **Not using MPS** — without MPS, CUDA context switching kills throughput
-3. **SGLang sgl_kernel on SM121** — no prebuilt sm121 binaries. Use vLLM.
-4. **CUTLASS FP4 on SM121** — lacks tcgen05 tensor cores. Set VLLM_NVFP4_GEMM_BACKEND=marlin.
-5. **No GPU memory cap** — always set --gpu-memory-utilization 0.70 or system freezes.
+3. **Backend mismatch** — model-specific kernel flags are not portable. Use the launch recipe for your chosen model/runtime and verify logs.
+4. **No GPU memory cap** — always set a safe memory cap or leave equivalent headroom.
 4. **Shared file writes** — two agents writing the same file = corruption. Use kanban to coordinate.
 5. **Context explosion** — agents re-sending history bloats KV cache. Enforce SOUL.md rules.
 6. **No crash recovery** — always use `--continue` and enable checkpoints.

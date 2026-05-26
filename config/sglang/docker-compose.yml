@@ -13,7 +13,7 @@
 #
 # After starting, verify:
 #   curl http://localhost:30000/v1/models
-#   curl http://localhost:30000/v1/chat/completions -d '{"model":"nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4","messages":[{"role":"user","content":"hello"}]}'
+#   curl http://localhost:30000/v1/chat/completions -d '{"model":"your-served-model-name","messages":[{"role":"user","content":"hello"}]}'
 
 services:
   sglang:
@@ -35,7 +35,7 @@ services:
       - FLASHINFER_CUDA_ARCH_LIST=12.1f
       - CUDA_VISIBLE_DEVICES=0
     command: >
-      --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+      --model your-served-model-name
       --mem-fraction-static 0.70
       --max-model-len 32768
       --trust-remote-code

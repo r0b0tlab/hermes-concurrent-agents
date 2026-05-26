@@ -8,6 +8,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILES_DIR="$SCRIPT_DIR/profiles"
 CONFIG_SRC="$SCRIPT_DIR/config/profile-template.yaml"
+MODEL_NAME="${HCA_MODEL_NAME:-local-model}"
+ENDPOINT="${HCA_ENDPOINT:-http://127.0.0.1:8000/v1}"
+PROVIDER_NAME="${HCA_PROVIDER_NAME:-local-vllm}"
 DRY_RUN=false
 FORCE=false
 
@@ -21,12 +24,16 @@ usage(){
 Usage: setup.sh [OPTIONS]
 
 Options:
-  --dry-run   Print actions without changing profiles or kanban
-  --force     Overwrite existing profile config.yaml after making a timestamped backup
-  -h, --help  Show this help
+  --model NAME      Served model name to write into profiles (default: HCA_MODEL_NAME or local-model)
+  --endpoint URL    OpenAI-compatible base URL (default: HCA_ENDPOINT or http://127.0.0.1:8000/v1)
+  --provider NAME   Profile provider key (default: HCA_PROVIDER_NAME or local-vllm)
+  --dry-run         Print actions without changing profiles or kanban
+  --force           Overwrite existing profile config.yaml after making a timestamped backup
+  -h, --help        Show this help
 
 Safe default: existing ~/.hermes/profiles/<profile>/config.yaml files are preserved.
 SOUL.md templates are updated because they are project role templates.
+The profile config template is model-agnostic; the model must match your backend's served model id.
 USAGE
 }
 run(){
@@ -34,12 +41,24 @@ run(){
 }
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --model) MODEL_NAME="$2"; shift 2 ;;
+    --endpoint) ENDPOINT="$2"; shift 2 ;;
+    --provider) PROVIDER_NAME="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --force) FORCE=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) err "Unknown option: $1"; usage; exit 1 ;;
   esac
 done
+
+render_config(){
+  local dst="$1"
+  sed \
+    -e "s#__MODEL_NAME__#${MODEL_NAME//\/\\}#g" \
+    -e "s#__ENDPOINT__#${ENDPOINT//\/\\}#g" \
+    -e "s#__PROVIDER_NAME__#${PROVIDER_NAME//\/\\}#g" \
+    "$CONFIG_SRC" > "$dst"
+}
 
 echo ""
 echo "=========================================="
@@ -109,7 +128,13 @@ for profile in "${WORKER_PROFILES[@]}"; do
         run cp "$CONFIG_DST" "$BACKUP"
         ok "Backed up $profile config to $BACKUP"
       fi
-      run cp "$CONFIG_SRC" "$CONFIG_DST"
+      if [[ "$DRY_RUN" == true ]]; then
+        echo "[dry-run] render $CONFIG_SRC -> $CONFIG_DST model=$MODEL_NAME endpoint=$ENDPOINT provider=$PROVIDER_NAME"
+      else
+        TMP_CONFIG=$(mktemp)
+        render_config "$TMP_CONFIG"
+        mv "$TMP_CONFIG" "$CONFIG_DST"
+      fi
       ok "Applied config template for $profile"
     fi
   fi
@@ -122,9 +147,10 @@ ok "Kanban board ready"
 
 echo ""
 info "Backend verification hint:"
-echo "  curl http://127.0.0.1:8000/v1/models"
-echo "  bash scripts/benchmark.sh --dry-run --levels 1,2"
-echo "  bash scripts/benchmark.sh --levels 1,2,3,4,6"
+echo "  bash scripts/check-backend.sh --endpoint '$ENDPOINT' --model '$MODEL_NAME'"
+echo "  bash scripts/verify-local-only.sh --endpoint '$ENDPOINT' --provider '$PROVIDER_NAME' --model '$MODEL_NAME'"
+echo "  bash scripts/benchmark.sh --dry-run --levels 1,2 --model '$MODEL_NAME'"
+echo "  bash scripts/benchmark.sh --levels 1,2,3,4 --endpoint '$ENDPOINT' --model '$MODEL_NAME'"
 
 echo ""
 echo "=========================================="

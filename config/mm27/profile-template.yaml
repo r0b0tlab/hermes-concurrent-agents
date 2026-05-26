@@ -1,0 +1,38 @@
+# MiniMax M2.7 NVFP4 profile template for local Hermes workers
+# Applied by scripts/setup-mm27-demo.sh.
+#
+# This path targets a local vLLM/OpenAI-compatible endpoint serving MiniMax M2.7 NVFP4 with the optimized
+# FlashInfer-CUTLASS path.
+
+model:
+  default: __MODEL_NAME__
+  provider: __PROVIDER_NAME__
+  base_url: __ENDPOINT__
+  api_key: local
+
+providers:
+  __PROVIDER_NAME__:
+    base_url: __ENDPOINT__
+    api_key: local
+    api_mode: openai
+
+agent:
+  max_turns: 700
+  gateway_timeout: 10800
+  api_max_retries: 6
+  tool_use_enforcement: auto
+
+checkpoints:
+  enabled: true
+  max_snapshots: 30
+
+compression:
+  enabled: true
+  threshold: 0.55
+  target_ratio: 0.20
+  protect_last_n: 24
+
+terminal:
+  backend: local
+  timeout: 600
+  cwd: .

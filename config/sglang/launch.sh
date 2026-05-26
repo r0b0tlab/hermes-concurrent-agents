@@ -9,7 +9,7 @@ set -euo pipefail
 # Launch SGLang inference backend for concurrent agents
 # Alternative to docker-compose for direct docker run
 
-MODEL="${MODEL:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4}"
+MODEL="${MODEL:-your-served-model-name}"
 PORT="${PORT:-30000}"
 MEM_FRAC="${MEM_FRAC:-0.70}"
 MAX_LEN="${MAX_LEN:-32768}"

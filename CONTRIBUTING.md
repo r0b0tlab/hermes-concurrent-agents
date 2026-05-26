@@ -13,7 +13,7 @@ bash scripts/fault-injection-test.sh
 For hardware benchmark changes, include an artifact bundle from:
 
 ```bash
-bash scripts/benchmark.sh --levels 1,2,3,4,6 --endpoint http://127.0.0.1:8000/v1 --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+bash scripts/benchmark.sh --levels 1,2,3,4,6 --endpoint http://127.0.0.1:8000/v1 --model your-served-model-name
 ```
 
 Do not commit secrets, `.env` files, or private Hermes profile state.

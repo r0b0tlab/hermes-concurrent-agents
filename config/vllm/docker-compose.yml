@@ -1,16 +1,26 @@
-# vLLM with Marlin NVFP4 backend for GB10/DGX Spark (SM121)
-# Tested on GB10 with vLLM 0.20.1 + Marlin backend
+# Generic vLLM OpenAI-compatible backend for concurrent Hermes agents
 #
-# CUTLASS FP4 is BROKEN on SM121 (lacks tcgen05 tensor cores).
-# Marlin dequantizes FP4->BF16 on-the-fly: 50 tok/s, zero errors.
+# This compose file is intentionally model-agnostic. Choose the model and any
+# backend-specific flags through environment variables instead of editing docs.
 #
-# Usage: docker compose up -d
-# Verify: curl http://localhost:8000/v1/models
+# Required:
+#   export HCA_MODEL_PATH=/path/or/hf-id/of/your/model
+#   export HCA_MODEL_NAME=served-model-name-visible-in-/v1/models
+# Optional:
+#   export HCA_VLLM_IMAGE=vllm/vllm-openai:latest
+#   export HCA_MAX_MODEL_LEN=65536
+#   export HCA_MAX_NUM_SEQS=16
+#   export HCA_GPU_MEMORY_UTILIZATION=0.70
+#   export HCA_EXTRA_VLLM_ARGS="--trust-remote-code"
+#
+# MiniMax M2.7 NVFP4 note:
+#   Do not use the legacy FP4 fallback backend for the MM2.7 demo path. Use the
+#   FlashInfer-CUTLASS launch documented in docs/mm27-gb10-demo.md.
 
 services:
   vllm:
-    image: vllm/vllm-openai:latest
-    container_name: vllm-concurrent
+    image: ${HCA_VLLM_IMAGE:-vllm/vllm-openai:latest}
+    container_name: ${HCA_CONTAINER_NAME:-vllm-concurrent}
     deploy:
       resources:
         reservations:
@@ -19,27 +29,26 @@ services:
               count: all
               capabilities: [gpu]
     ports:
-      - "8000:8000"
+      - "${HCA_PORT:-8000}:8000"
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
+      - ${HCA_MODEL_ROOT:-/models}:${HCA_MODEL_ROOT:-/models}:ro
     environment:
-      - VLLM_USE_FLASHINFER_MOE_FP4=0
-      - VLLM_NVFP4_GEMM_BACKEND=marlin
-      - VLLM_TEST_FORCE_FP8_MARLIN=1
+      - HF_TOKEN=${HF_TOKEN:-}
+      - VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASHINFER}
+      - VLLM_NVFP4_GEMM_BACKEND=${VLLM_NVFP4_GEMM_BACKEND:-}
+      - VLLM_USE_FLASHINFER_MOE_FP4=${VLLM_USE_FLASHINFER_MOE_FP4:-}
     command: >
-      --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
-      --served-model-name nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+      --model ${HCA_MODEL_PATH:?set HCA_MODEL_PATH}
+      --served-model-name ${HCA_MODEL_NAME:?set HCA_MODEL_NAME}
       --host 0.0.0.0
       --port 8000
       --trust-remote-code
-      --enforce-eager
-      --gpu-memory-utilization 0.70
-      --max-model-len 65536
-      --max-num-seqs 16
-      --kv-cache-dtype fp8
-      --moe-backend marlin
-      --tool-call-parser qwen3_coder
-      --enable-auto-tool-choice
+      --gpu-memory-utilization ${HCA_GPU_MEMORY_UTILIZATION:-0.70}
+      --max-model-len ${HCA_MAX_MODEL_LEN:-65536}
+      --max-num-seqs ${HCA_MAX_NUM_SEQS:-16}
+      --kv-cache-dtype ${HCA_KV_CACHE_DTYPE:-fp8}
+      ${HCA_EXTRA_VLLM_ARGS:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]
       interval: 30s

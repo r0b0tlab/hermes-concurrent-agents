@@ -1,221 +1,199 @@
 # Deployment Guide
 
-Step-by-step guide to deploying concurrent Hermes agents on unified-memory hardware.
+Step-by-step guide to deploying concurrent Hermes agents on a local OpenAI-compatible model backend.
 
-## Phase 1: Hardware Setup
+The repo is model-agnostic: you choose the model, endpoint, and runtime flags. The only hard requirement is that your backend exposes `/v1/models` and `/v1/chat/completions` and that every Hermes profile uses the exact served model name.
 
-### Enable MPS (Optional)
+## Phase 1: Choose a Model and Endpoint
 
-> **Note:** MPS is NOT required when using vLLM's built-in continuous batching.
-> vLLM handles concurrent requests natively. Skip this section unless you have
-> a specific need for CUDA-level multi-process sharing.
-
-MPS lets multiple CUDA workloads share the GPU without hard partitioning.
+Set these values once and reuse them for setup, checks, benchmarks, and demos:
 
 ```bash
-# Start MPS daemon
-sudo nvidia-cuda-mps-control -d
-
-# Verify it's running
-pgrep nvidia-cuda-mps-control
-
-# Make it persistent (systemd)
-sudo tee /etc/systemd/system/nvidia-mps.service << 'EOF'
-[Unit]
-Description=NVIDIA MPS Daemon
-After=nvidia-persistenced.service
-
-[Service]
-Type=forking
-ExecStart=/usr/bin/nvidia-cuda-mps-control -d
-ExecStop=/usr/bin/nvidia-cuda-mps-control -q
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl enable --now nvidia-mps
+export HCA_ENDPOINT=http://127.0.0.1:8000/v1
+export HCA_MODEL_NAME=your-served-model-name
+export HCA_PROVIDER_NAME=local-vllm
 ```
 
-### Verify GPU
+`HCA_MODEL_NAME` must match the model id returned by:
 
 ```bash
-nvidia-smi
-# Should show your GPU with driver version and CUDA version
-# GB10 shows SM121 compute capability
+curl "$HCA_ENDPOINT/models"
 ```
 
-## Phase 2: Inference Backend
+## Phase 2: Start an Inference Backend
 
-### Option A: vLLM (Recommended for GB10)
+### Option A: vLLM
 
-vLLM with Marlin backend is the canonical tested path on GB10 (SM121). Keep the memory cap; omitting it can hard-freeze the machine.
+Generic vLLM launch shape:
 
 ```bash
-# Set Marlin backend (CRITICAL for SM121 — CUTLASS FP4 is broken)
-export VLLM_USE_FLASHINFER_MOE_FP4=0
-export VLLM_NVFP4_GEMM_BACKEND=marlin
-export VLLM_TEST_FORCE_FP8_MARLIN=1
+export HCA_MODEL_PATH=/path/or/hf-id/of/your/model
+export HCA_MODEL_NAME=your-served-model-name
 
 python3 -m vllm.entrypoints.openai.api_server \
-  --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 \
-  --served-model-name nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 \
+  --model "$HCA_MODEL_PATH" \
+  --served-model-name "$HCA_MODEL_NAME" \
   --host 0.0.0.0 --port 8000 \
-  --trust-remote-code --enforce-eager \
+  --trust-remote-code \
   --gpu-memory-utilization 0.70 \
-  --max-model-len 65536 --max-num-seqs 16 \
-  --kv-cache-dtype fp8 --moe-backend marlin \
-  --tool-call-parser qwen3_coder --enable-auto-tool-choice
-
-# Or use docker compose:
-# docker compose -f config/vllm/docker-compose.yml up -d
+  --max-model-len 65536 \
+  --max-num-seqs 16
 ```
 
-### Option B: SGLang (Experimental on GB10)
+Add only the backend-specific flags required by your chosen model/runtime. Do not copy kernel flags from another model family without verifying server logs.
 
-> **Warning:** SGLang's `sgl_kernel` has no prebuilt SM121 binaries.
-> This requires building from source with CUDA 13. Use vLLM for production.
+Docker Compose path:
 
 ```bash
-# Experimental only; prefer vLLM above on GB10.
-docker compose -f config/sglang/docker-compose.yml up -d
+export HCA_MODEL_PATH=/path/or/hf-id/of/your/model
+export HCA_MODEL_NAME=your-served-model-name
+docker compose -f config/vllm/docker-compose.yml up -d
 ```
 
-### Option C: Ollama (Easiest)
-```bash
-# Install
-curl -fsSL https://ollama.com/install.sh | sh
+### Option B: MiniMax M2.7 NVFP4 demo path
 
-# Pull a model
-ollama pull nemotron:30b-a3b-nvfp4
-
-# It auto-serves on port 11434
-```
-
-### Verify Backend
+For the local MiniMax M2.7 NVFP4 agent-team demo, use the dedicated guide:
 
 ```bash
-# Check models endpoint
-curl http://localhost:8000/v1/models
-
-# Test inference
-curl http://localhost:8000/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{"model":"nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4","messages":[{"role":"user","content":"Say hello in one sentence."}]}'
+less docs/mm27-gb10-demo.md
 ```
 
-## Phase 3: Profile Setup
+That path targets the optimized FlashInfer-CUTLASS runtime and keeps separate setup scripts/profiles so the public demo is not confused with other model recipes.
+
+### Option C: Ollama / llama.cpp / other OpenAI-compatible servers
+
+Any server is usable if it exposes OpenAI-compatible chat completions:
+
+```bash
+export HCA_ENDPOINT=http://127.0.0.1:11434/v1
+export HCA_MODEL_NAME=llama3.1:8b
+```
+
+## Phase 3: Verify Backend
+
+```bash
+bash scripts/check-backend.sh \
+  --endpoint "$HCA_ENDPOINT" \
+  --model "$HCA_MODEL_NAME"
+```
+
+This validates `/v1/models` and one small chat completion.
+
+## Phase 4: Profile Setup
 
 ```bash
 cd hermes-concurrent-agents
-bash setup.sh
+bash setup.sh \
+  --model "$HCA_MODEL_NAME" \
+  --endpoint "$HCA_ENDPOINT" \
+  --provider "$HCA_PROVIDER_NAME" \
+  --force
 ```
 
-This creates 5 isolated profiles: creative-worker, coder-worker, research-worker, qa-worker, orchestrator.
+This creates/updates five isolated profiles:
 
-### Configure Model Per Profile
+- `creative-worker`
+- `coder-worker`
+- `research-worker`
+- `qa-worker`
+- `orchestrator`
 
-If all profiles use the same backend, configure once:
+Existing profile configs are preserved unless `--force` is passed; forced replacement creates timestamped backups.
+
+Verify local-only configuration:
 
 ```bash
-# Edit each profile's config
-hermes -p creative-worker model  # interactive picker
-hermes -p coder-worker model
-# etc.
+bash scripts/verify-local-only.sh \
+  --endpoint "$HCA_ENDPOINT" \
+  --provider "$HCA_PROVIDER_NAME" \
+  --model "$HCA_MODEL_NAME"
 ```
 
-Or set via config:
-```bash
-# In ~/.hermes/profiles/creative-worker/config.yaml
-model:
-  default: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
-  provider: local-vllm
-  base_url: http://127.0.0.1:30000/v1
-  api_key: local
-```
-
-## Phase 4: Spawn Workers
+## Phase 5: Spawn Workers
 
 ```bash
-# Spawn 3 workers
 bash scripts/spawn.sh 3
-
-# Or with custom profiles
-bash scripts/spawn.sh 2 --profiles creative-worker,coder-worker
-
-# Check status
 bash scripts/status.sh
 ```
 
-## Phase 5: Create Tasks
+For an OBS-friendly single tmux session with named panes for a project demo:
 
-### Manual (CLI)
 ```bash
-hermes kanban create "Research topic A" --assignee research-worker
-hermes kanban create "Build API endpoint" --assignee coder-worker
-hermes kanban create "Write report" --assignee creative-worker --parent <research-id>
+bash scripts/spawn-mm27-demo.sh --session local-team-demo --prefix mm27 --workspace /tmp/local-team-demo
 ```
 
-### Automatic (Gateway Dispatcher)
+The spawn script name is MM2.7-oriented, but the tmux layout pattern is usable with any profile prefix.
+
+## Phase 6: Create Tasks
+
+Manual CLI examples:
+
 ```bash
-# Start gateway — it runs the kanban dispatcher every 60s
-hermes gateway start
+hermes kanban create "Research requirements" --assignee research-worker
+hermes kanban create "Implement the script" --assignee coder-worker
+hermes kanban create "Write launch copy" --assignee creative-worker
+hermes kanban create "Test and verify" --assignee qa-worker
 ```
 
-### From Orchestrator
+From the orchestrator pane:
+
 ```bash
-# The orchestrator profile decomposes goals into kanban tasks
-tmux send-keys -t hca-1 "Break down this goal into tasks for the team: [your goal]" Enter
+tmux send-keys -t hca-1 "Break down this project into kanban tasks for coder, research, creative, and QA workers. Require QA PASS before final report." Enter
 ```
 
-## Phase 6: Monitor
+## Phase 7: Benchmark
 
 ```bash
-# Quick status
+bash scripts/benchmark.sh \
+  --levels 1,2,3,4 \
+  --endpoint "$HCA_ENDPOINT" \
+  --model "$HCA_MODEL_NAME"
+```
+
+Report only numbers backed by the generated artifact directory.
+
+## Phase 8: Monitor and Shutdown
+
+```bash
 bash scripts/status.sh
-
-# Continuous health monitoring
-bash scripts/health-monitor.sh
-
-# Kanban board
 hermes kanban list
-hermes kanban watch
-
-# GPU utilization
 nvidia-smi -l 5
-```
 
-## Phase 7: Shutdown
-
-```bash
-# Graceful shutdown
 bash scripts/shutdown.sh
-
-# Stop inference backend
-docker stop vllm-concurrent
-
-# Stop MPS
-sudo nvidia-cuda-mps-control -q
 ```
 
 ## Troubleshooting
 
-### Workers not claiming tasks
-- Check gateway is running: `hermes gateway status`
-- Check kanban board has tasks: `hermes kanban list`
-- Check profile names match: `hermes profile list`
+### Backend not reachable
+
+- Confirm server is running.
+- Check `curl "$HCA_ENDPOINT/models"`.
+- Ensure the URL includes `/v1` when required by your backend.
+
+### Hermes returns model-not-found
+
+- Your profile `model.default` does not match `/v1/models`.
+- Re-run `setup.sh --model "$HCA_MODEL_NAME" --endpoint "$HCA_ENDPOINT" --force`.
+
+### Workers use a remote provider
+
+Run:
+
+```bash
+bash scripts/verify-local-only.sh --endpoint "$HCA_ENDPOINT" --provider "$HCA_PROVIDER_NAME" --model "$HCA_MODEL_NAME"
+```
+
+Fix every failing profile before claiming the team is fully local.
 
 ### OOM errors
-- Reduce `--mem-fraction-static` from 0.70 to 0.60
-- Reduce `--max-model-len` from 32768 to 16384
-- Reduce number of concurrent workers
+
+- Reduce max context.
+- Reduce concurrency.
+- Lower backend memory utilization.
+- Stop unrelated GPU processes before recording.
 
 ### Slow inference
-- Verify MPS is running: `pgrep nvidia-cuda-mps-control`
-- Check GPU utilization: `nvidia-smi`
-- Verify SM121 kernels (not SM120 fallback)
 
-### Workers crashing
-- Check logs: `tmux capture-pane -t <session> -p -S -50`
-- Resume with: `hermes -p <profile> --continue`
-- Check kanban for stale tasks: `hermes kanban list`
+- Warm the backend before the real run.
+- Benchmark 1, 2, 3, and 4 workers to find your hardware's sweet spot.
+- Check that backend logs show the optimized path for your chosen model/runtime.

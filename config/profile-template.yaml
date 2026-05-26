@@ -1,19 +1,21 @@
 # Template config.yaml for worker profiles
 # Applied by setup.sh to each profile.
 #
-# Points to local vLLM server (Nemotron-NVFP4, Marlin backend).
-# Change base_url if using a different inference backend.
+# This template is intentionally model-agnostic. Set the served model name and
+# OpenAI-compatible endpoint when running setup.sh, or edit after setup.
+# The model name MUST match your backend's /v1/models id / --served-model-name.
 
 model:
-  default: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
-  provider: local-vllm
-  base_url: http://127.0.0.1:8000/v1
+  default: __MODEL_NAME__
+  provider: __PROVIDER_NAME__
+  base_url: __ENDPOINT__
   api_key: local
 
 providers:
-  local-vllm:
-    base_url: http://127.0.0.1:8000/v1
+  __PROVIDER_NAME__:
+    base_url: __ENDPOINT__
     api_key: local
+    api_mode: openai
 
 agent:
   max_turns: 500

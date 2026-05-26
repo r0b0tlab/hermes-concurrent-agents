@@ -17,7 +17,11 @@ check_file(){
 for path in README.md SKILL.md LICENSE CHANGELOG.md CONTRIBUTING.md \
   setup.sh scripts/spawn.sh scripts/shutdown.sh scripts/status.sh \
   scripts/benchmark.sh scripts/health-monitor.sh scripts/smoke-kanban-flow.sh \
-  scripts/fault-injection-test.sh docs/deployment-guide.md docs/tuning-guide.md \
+  scripts/check-backend.sh scripts/verify-local-only.sh scripts/verify-model-choice.sh \
+  scripts/setup-mm27-demo.sh scripts/spawn-mm27-demo.sh \
+  demos/mm27-local-agent-team/README.md demos/mm27-local-agent-team/SPEC.md \
+  demos/mm27-local-agent-team/create-kanban-tasks.sh demos/mm27-local-agent-team/acceptance-check.sh \
+  scripts/fault-injection-test.sh docs/deployment-guide.md docs/mm27-gb10-demo.md docs/tuning-guide.md \
   docs/workflow-patterns.md docs/grade/rubric.md docs/grade/current-score.md; do
   check_file "$path"
 done

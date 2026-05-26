@@ -106,7 +106,7 @@ Improved:
 The repo is ready for a clean benchmark evidence run.
 
 ```bash
-bash scripts/benchmark.sh   --levels 1,2,3,4,6   --endpoint http://127.0.0.1:8000/v1   --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+bash scripts/benchmark.sh   --levels 1,2,3,4,6   --endpoint http://127.0.0.1:8000/v1   --model your-served-model-name
 ```
 
 Then update the README performance table so every number is either measured with an artifact path or clearly marked estimated.
