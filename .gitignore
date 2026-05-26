@@ -1,0 +1,16 @@
+# Local-only Hermes notes, plans, reviews, and recording workspaces.
+.hermes/
+demo-runs/
+benchmarks/video-pre/
+
+# Editor / OS scratch
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.bak
+*.bak.*
+
+# Python bytecode
+__pycache__/
+*.pyc
