@@ -25,6 +25,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Install package
         run: pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check src tests
       - name: Unit tests
         run: pytest -q tests/unit
       - name: Contract tests (skip if hermes absent)

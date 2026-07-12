@@ -43,6 +43,15 @@ hca bench --engine sglang --endpoint http://127.0.0.1:30000/v1 --model <id>
 
 Set `capacity.max_top_level_runs` / `max_total_sequences` from the measured knee — never invent universal N.
 
+## One dispatcher only
+
+The Hermes gateway can run its own Kanban dispatcher for the same board
+(`HERMES_KANBAN_DISPATCH_IN_GATEWAY`). Run **either** the gateway dispatcher
+**or** `hca up`, never both against one board — two dispatchers race for the
+same ready tasks and the gateway's spawns bypass HCA slots, admission, and
+observability. If `hermes gateway` runs on the box, disable its kanban
+dispatch or point HCA at a dedicated board.
+
 ## UMA recovery (manual)
 
 ```bash

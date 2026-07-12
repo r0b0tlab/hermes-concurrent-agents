@@ -76,14 +76,20 @@ def test_bench_dry_run():
 
 
 def test_parser_has_complete_commands():
+    import argparse
+
     p = build_parser()
+    subparsers = next(a for a in p._actions if isinstance(a, argparse._SubParsersAction))
     for cmd in [
+        "version",
+        "presets",
         "init",
         "doctor",
         "up",
         "drain",
         "down",
         "ps",
+        "status",
         "watch",
         "peek",
         "attach",
@@ -98,12 +104,12 @@ def test_parser_has_complete_commands():
         "task",
         "cluster",
     ]:
-        assert p.parse_args([cmd, "--help"] if False else ["presets"]).cmd in {
-            "presets",
-            cmd,
-        } or True
-    # smoke: plan
+        assert cmd in subparsers.choices, f"missing subcommand: {cmd}"
+
+
+def test_cli_smoke(tmp_path: Path):
     assert main(["plan", "--preset", "generic-linux", "--json"]) == 0
     assert main(["bench", "--dry-run", "--preset", "gb10-vllm", "--model", "x"]) == 0
-    assert main(["drain", "--state-dir", "/tmp/hca-test-drain"]) == 0
-    assert main(["drain", "--clear", "--state-dir", "/tmp/hca-test-drain"]) == 0
+    drain_dir = str(tmp_path / "drain")
+    assert main(["drain", "--state-dir", drain_dir]) == 0
+    assert main(["drain", "--clear", "--state-dir", drain_dir]) == 0

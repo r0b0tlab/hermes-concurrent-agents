@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# WARNING: SGLang is EXPERIMENTAL on GB10 (SM121).
-# sgl_kernel has no prebuilt sm121 binaries — requires building from source with CUDA 13.
-# Use vLLM config (config/vllm/) instead for production.
-# See: https://github.com/sgl-project/sglang/issues/11658
+# Launch SGLang inference backend for concurrent Hermes agents
+# Alternative to docker-compose for direct docker run.
+#
+# Aligned with the NVIDIA DGX Spark SGLang playbook (CUDA 13 image, flashinfer):
+#   https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/sglang
+# NVFP4 models additionally require: EXTRA_ARGS="--quantization modelopt_fp4"
 
-# Launch SGLang inference backend for concurrent agents
-# Alternative to docker-compose for direct docker run
-
-MODEL="${MODEL:-your-served-model-name}"
+MODEL_PATH="${MODEL_PATH:?set MODEL_PATH to a local path or HF id}"
+MODEL_NAME="${MODEL_NAME:?set MODEL_NAME to the served model name}"
 PORT="${PORT:-30000}"
-MEM_FRAC="${MEM_FRAC:-0.70}"
-MAX_LEN="${MAX_LEN:-32768}"
-IMAGE="${IMAGE:-lmsysorg/sglang:latest}"
+MEM_FRAC="${MEM_FRAC:-0.75}"
+MAX_LEN="${MAX_LEN:-65536}"           # Hermes requires >=64k context for tool use
+TOOL_PARSER="${TOOL_PARSER:-qwen}"    # model-specific; required for Hermes tool calling
+IMAGE="${IMAGE:-lmsysorg/sglang:latest-cu130}"
+EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 echo "Starting SGLang inference backend..."
-echo "  Model: $MODEL"
+echo "  Model: $MODEL_PATH (served as $MODEL_NAME)"
 echo "  Port: $PORT"
 echo "  Memory fraction: $MEM_FRAC"
 echo "  Max model length: $MAX_LEN"
@@ -25,24 +27,28 @@ echo "  Max model length: $MAX_LEN"
 docker stop sglang-concurrent 2>/dev/null || true
 docker rm sglang-concurrent 2>/dev/null || true
 
+# shellcheck disable=SC2086
 docker run -d \
     --name sglang-concurrent \
-    --runtime nvidia \
     --gpus all \
     -p "${PORT}:30000" \
     -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
-    -e "FLASHINFER_CUDA_ARCH_LIST=12.1f" \
+    -e "HF_TOKEN=${HF_TOKEN:-}" \
     "$IMAGE" \
-    --model "$MODEL" \
-    --mem-fraction-static "$MEM_FRAC" \
-    --max-model-len "$MAX_LEN" \
-    --trust-remote-code \
-    --quantization modelopt_fp4 \
-    --port 30000 \
+    python3 -m sglang.launch_server \
+    --model-path "$MODEL_PATH" \
+    --served-model-name "$MODEL_NAME" \
     --host 0.0.0.0 \
-    --enforce-eager
+    --port 30000 \
+    --trust-remote-code \
+    --attention-backend flashinfer \
+    --mem-fraction-static "$MEM_FRAC" \
+    --context-length "$MAX_LEN" \
+    --tool-call-parser "$TOOL_PARSER" \
+    --enable-metrics \
+    $EXTRA_ARGS
 
 echo ""
-echo "SGLang starting... health check in 120s"
-echo "Verify: curl http://localhost:${PORT}/v1/models"
+echo "SGLang starting... health check in ~120s"
+echo "Verify: curl http://localhost:${PORT}/v1/models && hca doctor --tools"
 echo "Logs:   docker logs -f sglang-concurrent"

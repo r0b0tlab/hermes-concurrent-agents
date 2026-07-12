@@ -17,6 +17,7 @@ pip install -e ".[dev]"
 
 ```bash
 # Engine: https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/vllm
+# Launch pack: config/vllm/ — sets --enable-auto-tool-choice --tool-call-parser hermes + >=64k ctx
 hca init --preset gb10-vllm --model <served-model-id>
 hca doctor
 hca up --daemon
@@ -28,9 +29,14 @@ hca task add "Implement feature X" --role coder
 
 ```bash
 # Engine: https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/sglang  (:30000)
+# Launch pack: config/sglang/ — cu130 image, flashinfer, --tool-call-parser qwen + >=64k ctx
 hca init --preset gb10-sglang --model <served-model-id>
 hca doctor && hca up
 ```
+
+Hermes requires ≥64k context and a working tool-call parser from the endpoint — see
+[vLLM & SGLang](docs/backends-vllm-sglang.md). `hca init` persists the resolved fleet, so
+later bare `hca doctor` / `hca up` / `hca watch` reuse it.
 
 ## Cluster (after NVIDIA connect-* + passwordless SSH)
 

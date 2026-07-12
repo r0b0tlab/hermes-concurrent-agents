@@ -128,6 +128,7 @@ class TmuxManager:
         *,
         env: Optional[dict[str, str]] = None,
         workdir: Optional[str] = None,
+        log_path: Optional[str] = None,
     ) -> int:
         """
         Replace the slot's pane process with `exec <command>` so pane_pid == worker pid.
@@ -143,9 +144,19 @@ class TmuxManager:
             f"{shlex.quote(k)}={shlex.quote(v)}" for k, v in sorted(env.items())
         )
         cd = f"cd {shlex.quote(workdir)} && " if workdir else ""
+        # close any pipe left over from the previous run of this pane
+        self._cmd("pipe-pane", "-t", name, check=False)
         # respawn-pane -k kills current pane process and runs new command
         shell = f"{cd}export {exports}; exec {command}" if exports else f"{cd}exec {command}"
         self._cmd("respawn-pane", "-k", "-t", name, "bash", "-lc", shell)
+        if log_path:
+            self._cmd(
+                "pipe-pane",
+                "-t",
+                name,
+                f"cat >> {shlex.quote(log_path)}",
+                check=False,
+            )
         pid = self.pane_pid(name)
         if pid is None:
             raise TmuxError(f"no pane pid after respawn for {name}")

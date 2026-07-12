@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import json
 import os
-import sys
 import tomllib
 from pathlib import Path
 from typing import Any, Optional
@@ -21,8 +21,9 @@ from hca.models import (
     Transport,
 )
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_PRESET_DIR = PACKAGE_ROOT / "config" / "presets"
+# Data files ship inside the package so wheel installs work, not just -e.
+PACKAGE_DIR = Path(__file__).resolve().parent
+DEFAULT_PRESET_DIR = PACKAGE_DIR / "presets"
 
 
 def _enum(cls, value: Any, default):
@@ -154,6 +155,86 @@ def fleet_from_dict(data: dict[str, Any]) -> FleetConfig:
     )
 
 
+def config_shape(cfg: FleetConfig) -> dict[str, Any]:
+    """Serialize a FleetConfig back into the TOML-shaped dict fleet_from_dict reads."""
+    return {
+        "preset": cfg.preset,
+        "fleet": {
+            "name": cfg.name,
+            "board": cfg.board,
+            "role": cfg.role.value,
+            "tmux_socket": cfg.tmux_socket,
+            "dispatch_interval_seconds": cfg.dispatch_interval_seconds,
+            "warm_slots": cfg.warm_slots,
+            "drain_policy": cfg.drain_policy,
+            "state_dir": cfg.state_dir,
+        },
+        "backend": {
+            "engine": cfg.backend.engine.value,
+            "endpoint": cfg.backend.endpoint,
+            "model": cfg.backend.model,
+            "api_mode": cfg.backend.api_mode,
+            "local_only": cfg.backend.local_only,
+            "metrics_url": cfg.backend.metrics_url,
+            "auxiliary_endpoint": cfg.backend.auxiliary_endpoint,
+        },
+        "capacity": {
+            "max_top_level_runs": cfg.capacity.max_top_level_runs,
+            "max_total_sequences": cfg.capacity.max_total_sequences,
+            "memory_high": cfg.capacity.memory_high,
+            "memory_low": cfg.capacity.memory_low,
+            "disk_high": cfg.capacity.disk_high,
+            "disk_low": cfg.capacity.disk_low,
+            "per_role_caps": cfg.capacity.per_role_caps,
+            "reserve_retry_lane": cfg.capacity.reserve_retry_lane,
+            "launch_stagger_seconds": cfg.capacity.launch_stagger_seconds,
+            "max_wave_size": cfg.capacity.max_wave_size,
+        },
+        "cluster": {
+            "transport": cfg.cluster.transport.value,
+            "nodes": [
+                {
+                    "host": n.host,
+                    "ssh_user": n.ssh_user,
+                    "ssh_port": n.ssh_port,
+                    "labels": n.labels,
+                    "fabric_ip": n.fabric_ip,
+                    "engine": n.engine.value,
+                    "endpoint": n.endpoint,
+                }
+                for n in cfg.cluster.nodes
+            ],
+            "probe_interval_seconds": cfg.cluster.probe_interval_seconds,
+            "placement_policy": cfg.cluster.placement_policy,
+            "require_same_username": cfg.cluster.require_same_username,
+            "ssh_batch_mode": cfg.cluster.ssh_batch_mode,
+            "ssh_control_master": cfg.cluster.ssh_control_master,
+            "connect_timeout_seconds": cfg.cluster.connect_timeout_seconds,
+            "command_timeout_seconds": cfg.cluster.command_timeout_seconds,
+        },
+        "observe": {
+            "watch_interval_seconds": cfg.observe.watch_interval_seconds,
+            "peek_lines": cfg.observe.peek_lines,
+            "activity_retention_days": cfg.observe.activity_retention_days,
+            "transcript_source": cfg.observe.transcript_source,
+            "redact_patterns": cfg.observe.redact_patterns,
+        },
+        "retention": {
+            "max_log_bytes_per_run": cfg.retention.max_log_bytes_per_run,
+            "activity_days": cfg.retention.activity_days,
+            "completed_run_log_ttl_days": cfg.retention.completed_run_log_ttl_days,
+            "worktree_retain_until": cfg.retention.worktree_retain_until,
+        },
+        "profiles": {"slots": cfg.profile_slots},
+        "delegation": {"max_concurrent_children": cfg.delegation_max_children},
+        "approvals": {"yolo": cfg.approvals_yolo},
+    }
+
+
+def resolved_snapshot_path(state_dir: str = "") -> Path:
+    return Path(os.path.expanduser(state_dir or "~/.hca")) / "fleet.resolved.json"
+
+
 def load_fleet_config(
     *,
     preset: str = "",
@@ -173,6 +254,12 @@ def load_fleet_config(
         path = Path(config_path).expanduser()
         override = load_toml(path)
         data = _deep_merge(data, override)
+    if not data:
+        # No explicit preset/config: reuse what `hca init` resolved so bare
+        # `hca up` / `hca doctor` / `hca watch` keep the initialized fleet.
+        snap = resolved_snapshot_path(state_dir)
+        if snap.is_file():
+            data = json.loads(snap.read_text(encoding="utf-8"))
     cfg = fleet_from_dict(data)
     if endpoint:
         cfg.backend.endpoint = endpoint

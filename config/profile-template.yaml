@@ -4,28 +4,24 @@
 # This template is intentionally model-agnostic. Set the served model name and
 # OpenAI-compatible endpoint when running setup.sh, or edit after setup.
 # The model name MUST match your backend's /v1/models id / --served-model-name.
+#
+# Keys follow the documented Hermes config.yaml schema:
+# https://hermes-agent.nousresearch.com/docs/user-guide/configuration
+# Self-hosted OpenAI-compatible endpoints (vLLM/SGLang) use provider `custom`;
+# Hermes requires >=64k context for agent/tool use.
 
 model:
+  provider: custom
   default: __MODEL_NAME__
-  provider: __PROVIDER_NAME__
   base_url: __ENDPOINT__
   api_key: local
-
-providers:
-  __PROVIDER_NAME__:
-    base_url: __ENDPOINT__
-    api_key: local
-    api_mode: openai
+  api_mode: chat_completions
+  context_length: 65536
 
 agent:
   max_turns: 500
-  gateway_timeout: 7200
   api_max_retries: 5
   tool_use_enforcement: auto
-
-checkpoints:
-  enabled: true
-  max_snapshots: 20
 
 compression:
   enabled: true
@@ -36,4 +32,3 @@ compression:
 terminal:
   backend: local
   timeout: 300
-  cwd: .

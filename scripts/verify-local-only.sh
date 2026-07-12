@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROFILES="${HCA_PROFILES:-creative-worker,coder-worker,research-worker,qa-worker,orchestrator}"
 ENDPOINT="${HCA_ENDPOINT:-http://127.0.0.1:8000/v1}"
-PROVIDER="${HCA_PROVIDER_NAME:-local-vllm}"
+PROVIDER="${HCA_PROVIDER_NAME:-custom}"
 MODEL="${HCA_MODEL_NAME:-}"
 DRY_RUN=false
 SMOKE=false

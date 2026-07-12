@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
-import urllib.request
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 from hca.backends import openai_compat as oai
 from hca.models import CapacitySnapshot
@@ -21,48 +19,47 @@ def _root(endpoint: str) -> str:
 def fetch_capacity(endpoint: str, metrics_url: str = "", timeout: float = 5.0) -> CapacitySnapshot:
     snap = CapacitySnapshot(engine="sglang", healthy=True)
     models = oai.probe_models(endpoint, timeout=timeout)
-    health_ok = False
     root = _root(endpoint)
-    # /health is documented in NVIDIA SGLang playbook
-    for url in [metrics_url, f"{root}/health", f"{root}/metrics"] if metrics_url else [f"{root}/health", f"{root}/metrics"]:
-        if not url:
-            continue
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "hca/2.0"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                body = resp.read().decode(errors="replace")
-            health_ok = True
-            if "cache" in body.lower() or body.lstrip().startswith("{"):
-                try:
-                    data = json.loads(body)
-                    if isinstance(data, dict):
-                        snap.kv_cache_util = _first_float(
-                            data, ["token_usage", "cache_hit_rate", "kv_cache_usage"]
-                        )
-                        snap.active_sequences = _first_float(
-                            data, ["num_running", "running", "active"]
-                        ) or 0.0
-                        snap.waiting = _first_float(data, ["num_waiting", "waiting"]) or 0.0
-                except json.JSONDecodeError:
-                    pass
-            break
-        except Exception:
-            continue
+
+    # /health is documented in the NVIDIA SGLang playbook
+    health_ok = False
+    try:
+        oai.fetch_text(f"{root}/health", timeout=timeout)
+        health_ok = True
+    except Exception:
+        pass
 
     if not models.ok and not health_ok:
         snap.healthy = False
         snap.detail = models.detail
         return snap
 
+    # Prometheus metrics (present when the server runs with --enable-metrics)
+    metrics: dict[str, float] = {}
+    for url in [metrics_url, f"{root}/metrics"]:
+        if not url:
+            continue
+        try:
+            metrics = oai.parse_prometheus(oai.fetch_text(url, timeout=timeout))
+            break
+        except Exception:
+            continue
+
+    if metrics:
+        # token_usage is the KV-token pool utilization fraction
+        snap.kv_cache_util = oai.first_metric(metrics, ["sglang:token_usage", "token_usage"])
+        snap.active_sequences = (
+            oai.first_metric(metrics, ["sglang:num_running_reqs", "num_running_reqs"]) or 0.0
+        )
+        snap.waiting = (
+            oai.first_metric(metrics, ["sglang:num_queue_reqs", "num_queue_reqs"]) or 0.0
+        )
+        snap.prefix_hit_rate = oai.first_metric(
+            metrics, ["sglang:cache_hit_rate", "cache_hit_rate"]
+        )
+
     if not models.ok:
         snap.detail = f"sglang health ok; models soft-fail: {models.detail}"
     else:
-        snap.detail = "sglang ok"
+        snap.detail = "sglang ok" + (" (metrics)" if metrics else " (no metrics)")
     return snap
-
-
-def _first_float(data: dict, keys: list[str]):
-    for k in keys:
-        if k in data and isinstance(data[k], (int, float)):
-            return float(data[k])
-    return None

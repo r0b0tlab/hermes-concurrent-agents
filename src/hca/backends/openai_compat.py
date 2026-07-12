@@ -28,6 +28,39 @@ def _http_json(url: str, *, method: str = "GET", body: Optional[dict] = None, ti
         return json.loads(raw) if raw else {}
 
 
+def parse_prometheus(text: str) -> dict[str, float]:
+    """Parse simple metric-value lines from Prometheus exposition text."""
+    out: dict[str, float] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name = parts[0].split("{", 1)[0]
+        try:
+            out[name] = float(parts[-1])
+        except ValueError:
+            continue
+    return out
+
+
+def first_metric(metrics: dict[str, float], keys: list[str]) -> Optional[float]:
+    """First present value among keys; 0.0 is a valid reading, not a miss."""
+    for k in keys:
+        v = metrics.get(k)
+        if v is not None:
+            return float(v)
+    return None
+
+
+def fetch_text(url: str, timeout: float = 5.0) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "hca/2.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode(errors="replace")
+
+
 def is_local_endpoint(endpoint: str) -> bool:
     host = urlparse(endpoint).hostname or ""
     return host in {"127.0.0.1", "localhost", "0.0.0.0", "::1"} or host.startswith("10.") or host.startswith("192.168.") or host.startswith("172.")

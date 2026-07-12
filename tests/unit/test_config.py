@@ -1,4 +1,4 @@
-from hca.config import fleet_from_dict, list_presets, load_fleet_config, resolve_preset_path
+from hca.config import list_presets, load_fleet_config
 from hca.models import Engine, FleetRole
 
 

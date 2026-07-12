@@ -11,7 +11,9 @@ HCA composes with NVIDIA playbooks; it does not reimplement Spark networking or 
 | N-node switch | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/multi-sparks-through-switch |
 | NCCL | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/nccl |
 | vLLM | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/vllm |
-| SGLang | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/sglang |
+| SGLang (CUDA 13 image `lmsysorg/sglang:latest-cu130`) | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/sglang |
+| TensorRT-LLM (`trtllm-serve`, :8355) | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/trt-llm |
+| llama.cpp (native build, sm_121a) | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/llama-cpp |
 | Hermes + local vLLM | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/hermes-agent |
 | Tailscale | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/tailscale |
 | Forum | https://forums.developer.nvidia.com/c/accelerated-computing/dgx-spark-gb10 |

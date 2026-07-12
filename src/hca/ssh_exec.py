@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import shlex
 import subprocess
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass

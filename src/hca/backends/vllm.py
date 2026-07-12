@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import urllib.request
-from typing import Optional
 from urllib.parse import urlparse, urlunparse
 
 from hca.backends import openai_compat as oai
@@ -20,24 +18,6 @@ def _metrics_candidates(endpoint: str, metrics_url: str = "") -> list[str]:
     return [f"{root}/metrics", f"{root}/v1/metrics"]
 
 
-def _parse_prometheus(text: str) -> dict[str, float]:
-    out: dict[str, float] = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        # simple metric value lines
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        name = parts[0].split("{", 1)[0]
-        try:
-            out[name] = float(parts[-1])
-        except ValueError:
-            continue
-    return out
-
-
 def fetch_capacity(endpoint: str, metrics_url: str = "", timeout: float = 5.0) -> CapacitySnapshot:
     snap = CapacitySnapshot(engine="vllm", healthy=True)
     # health via models
@@ -51,9 +31,7 @@ def fetch_capacity(endpoint: str, metrics_url: str = "", timeout: float = 5.0) -
     last_err = ""
     for url in _metrics_candidates(endpoint, metrics_url):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "hca/2.0"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                text = resp.read().decode(errors="replace")
+            text = oai.fetch_text(url, timeout=timeout)
             if text.lstrip().startswith("{"):
                 data = json.loads(text)
                 # JSON metrics if ever exposed
@@ -61,7 +39,7 @@ def fetch_capacity(endpoint: str, metrics_url: str = "", timeout: float = 5.0) -
                     if isinstance(v, (int, float)):
                         metrics[str(k)] = float(v)
             else:
-                metrics = _parse_prometheus(text)
+                metrics = oai.parse_prometheus(text)
             last_err = ""
             break
         except Exception as exc:
@@ -72,23 +50,24 @@ def fetch_capacity(endpoint: str, metrics_url: str = "", timeout: float = 5.0) -
         snap.detail = f"vllm healthy but metrics unavailable ({last_err})"
         return snap
 
-    # Best-effort mapping across vLLM versions
-    snap.kv_cache_util = (
-        metrics.get("vllm:gpu_cache_usage_perc")
-        or metrics.get("vllm:kv_cache_usage_perc")
-        or metrics.get("gpu_cache_usage_perc")
+    # Best-effort mapping across vLLM versions; 0.0 readings are valid
+    snap.kv_cache_util = oai.first_metric(
+        metrics,
+        ["vllm:gpu_cache_usage_perc", "vllm:kv_cache_usage_perc", "gpu_cache_usage_perc"],
     )
     snap.active_sequences = (
-        metrics.get("vllm:num_requests_running")
-        or metrics.get("vllm:num_running_sys")
-        or metrics.get("num_requests_running")
+        oai.first_metric(
+            metrics,
+            ["vllm:num_requests_running", "vllm:num_running_sys", "num_requests_running"],
+        )
         or 0.0
     )
     snap.waiting = (
-        metrics.get("vllm:num_requests_waiting")
-        or metrics.get("num_requests_waiting")
-        or 0.0
+        oai.first_metric(metrics, ["vllm:num_requests_waiting", "num_requests_waiting"]) or 0.0
     )
-    snap.prefix_hit_rate = metrics.get("vllm:prefix_cache_hits_total")
+    hits = oai.first_metric(metrics, ["vllm:prefix_cache_hits_total"])
+    queries = oai.first_metric(metrics, ["vllm:prefix_cache_queries_total"])
+    if hits is not None and queries:
+        snap.prefix_hit_rate = hits / queries
     snap.detail = "vllm metrics ok" if metrics else "vllm no metrics"
     return snap

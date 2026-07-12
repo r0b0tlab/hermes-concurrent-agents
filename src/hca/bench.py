@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hca.backends import openai_compat as oai
-from hca.models import Engine
 
 
 @dataclass

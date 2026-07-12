@@ -13,9 +13,9 @@ from typing import Any, Optional
 
 from hca import __version__
 from hca.bench import run_bench
-from hca.config import list_presets, load_fleet_config
+from hca.config import config_shape, list_presets, load_fleet_config
 from hca.doctor import run_doctor
-from hca.hermes_compat import HermesCompatError, hermes_bin, hermes_version, run_hermes
+from hca.hermes_compat import HermesCompatError, hermes_version, run_hermes
 from hca.logs import follow_log, read_log
 from hca.observe import format_status_table, peek_slot, status_rows
 from hca.profiles import init_profiles
@@ -76,7 +76,8 @@ def cmd_init(args) -> int:
     Path(cfg.state_dir).mkdir(parents=True, exist_ok=True)
     snap = Path(cfg.state_dir) / "fleet.resolved.json"
     if not args.dry_run:
-        snap.write_text(json.dumps(cfg.to_dict(), indent=2), encoding="utf-8")
+        # TOML-shaped snapshot: bare `hca up`/`doctor`/`watch` reload this fleet
+        snap.write_text(json.dumps(config_shape(cfg), indent=2), encoding="utf-8")
         StateDB(Path(cfg.state_dir) / "hca.sqlite")
         (Path(cfg.state_dir) / "logs").mkdir(exist_ok=True)
         (Path(cfg.state_dir) / "worktrees").mkdir(exist_ok=True)
@@ -718,9 +719,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_dash.add_argument("--url", default="http://127.0.0.1:9119/")
     p_dash.add_argument("--open", action="store_true")
 
-    p_plan = sp.add_parser(
-        "plan", parents=[common], help="Capacity dry-run estimate for this fleet"
-    )
+    sp.add_parser("plan", parents=[common], help="Capacity dry-run estimate for this fleet")
 
     p_task = sp.add_parser("task", parents=[common], help="Kanban task helpers")
     t_sp = p_task.add_subparsers(dest="task_cmd")

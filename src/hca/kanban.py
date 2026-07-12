@@ -10,11 +10,11 @@ from typing import Any, Optional
 
 from hca.config import FleetConfig
 from hca.hermes_compat import (
-    HermesCompatError,
     assert_dispatch_contract,
     import_kanban_db,
     worker_command,
 )
+from hca.logs import log_path
 from hca.observe import slot_name
 from hca.state import RunRecord, StateDB
 from hca.tmux import TmuxManager, sanitize_session_name
@@ -28,25 +28,35 @@ def _open_kanban_conn(board: Optional[str] = None) -> sqlite3.Connection:
     return conn
 
 
+def pick_idle_slot(
+    cfg: FleetConfig,
+    state: StateDB,
+    role_cursors: dict[str, int],
+    assignee: str,
+) -> Optional[str]:
+    """Round-robin an idle slot for the assignee's role; None if all are busy.
+
+    Never returns a slot with a live run: respawning a busy pane would kill the
+    worker running in it.
+    """
+    # assignee may be profile name like coder-worker or hca-fleet-coder-01
+    role = _role_from_assignee(assignee)
+    n = int(cfg.profile_slots.get(role, 1) or 1)
+    busy = {r.slot for r in state.list_runs(status="running")}
+    cur = role_cursors.get(role, 0)
+    for offset in range(n):
+        idx = ((cur + offset) % n) + 1
+        name = slot_name(cfg.name, role, idx)
+        if name not in busy:
+            role_cursors[role] = cur + offset + 1
+            return name
+    return None
+
+
 def make_tmux_spawn_fn(cfg: FleetConfig, state: StateDB, tmux: TmuxManager):
     """Return spawn_fn(task, workspace, board=None) -> pid for Hermes dispatcher."""
 
-    # round-robin empty slots by role
     role_cursors: dict[str, int] = {}
-
-    def _pick_slot(assignee: str) -> str:
-        # assignee may be profile name like coder-worker or hca-fleet-coder-01
-        role = "coder"
-        a = (assignee or "").lower()
-        for key in ("orchestrator", "coder", "research", "qa", "creative"):
-            if key in a:
-                role = key
-                break
-        n = int(cfg.profile_slots.get(role, 1) or 1)
-        cur = role_cursors.get(role, 0)
-        idx = (cur % n) + 1
-        role_cursors[role] = cur + 1
-        return slot_name(cfg.name, role, idx)
 
     def spawn_fn(task, workspace: str, board: Optional[str] = None) -> Optional[int]:
         board = board or cfg.board
@@ -60,7 +70,22 @@ def make_tmux_spawn_fn(cfg: FleetConfig, state: StateDB, tmux: TmuxManager):
                 run_id = str(v)
                 break
 
-        slot = _pick_slot(assignee)
+        slot = pick_idle_slot(cfg, state, role_cursors, assignee)
+        if slot is None:
+            state.set_activity(
+                kind="admission.wait",
+                message=f"no idle {_role_from_assignee(assignee)} slot for {task_id}; task stays queued",
+                board=str(board),
+                task_id=str(task_id),
+            )
+            return None
+        # Defensive: a stale 'running' row on this slot (crash before reconcile)
+        # would violate the live-slot unique index on insert.
+        for stale in state.list_runs(status="running"):
+            if stale.slot == slot:
+                state.mark_run_status(
+                    stale.board, stale.run_id, "superseded", error="slot reused by new spawn"
+                )
         # Prefer concrete profile if assignee looks like a profile
         profile = assignee if assignee.startswith("hca-") else f"hca-{cfg.name}-{_role_from_assignee(assignee)}-01"
         # If assignee is already a full profile name from hermes, use it
@@ -69,17 +94,13 @@ def make_tmux_spawn_fn(cfg: FleetConfig, state: StateDB, tmux: TmuxManager):
         ).is_dir():
             profile = assignee
 
-        hermes_home = os.path.expanduser(f"~/.hermes/profiles/{profile}")
-        if not Path(hermes_home).is_dir():
-            # fall back to default hermes home with -p profile
-            hermes_home = os.path.expanduser("~/.hermes")
-
         kb = import_kanban_db()
         kanban_db = str(kb.kanban_db_path(board=board))
         workspaces_root = str(Path(workspace).expanduser().resolve().parent)
 
+        # HERMES_HOME stays untouched: it is the ~/.hermes config root, and the
+        # worker is addressed by profile via `hermes -p <profile>`.
         env = {
-            "HERMES_HOME": hermes_home,
             "HERMES_PROFILE": profile,
             "HERMES_KANBAN_TASK": str(task_id),
             "HERMES_KANBAN_RUN_ID": str(run_id),
@@ -98,7 +119,13 @@ def make_tmux_spawn_fn(cfg: FleetConfig, state: StateDB, tmux: TmuxManager):
                 env["HERMES_KANBAN_CLAIM_LOCK"] = str(v)
 
         cmd = worker_command(profile, str(task_id), yolo=cfg.approvals_yolo)
-        pid = tmux.run_in_slot(slot, cmd, env=env, workdir=str(workspace) if workspace else None)
+        pid = tmux.run_in_slot(
+            slot,
+            cmd,
+            env=env,
+            workdir=str(workspace) if workspace else None,
+            log_path=str(log_path(cfg.state_dir, str(run_id))),
+        )
         now = time.time()
         state.upsert_run(
             RunRecord(

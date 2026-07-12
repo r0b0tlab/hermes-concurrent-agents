@@ -6,11 +6,11 @@ set -euo pipefail
 # Safe by default: existing profile configs are preserved unless --force is passed.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROFILES_DIR="$SCRIPT_DIR/profiles"
+PROFILES_DIR="$SCRIPT_DIR/src/hca/templates/profiles"
 CONFIG_SRC="$SCRIPT_DIR/config/profile-template.yaml"
 MODEL_NAME="${HCA_MODEL_NAME:-local-model}"
 ENDPOINT="${HCA_ENDPOINT:-http://127.0.0.1:8000/v1}"
-PROVIDER_NAME="${HCA_PROVIDER_NAME:-local-vllm}"
+PROVIDER_NAME="${HCA_PROVIDER_NAME:-custom}"
 DRY_RUN=false
 FORCE=false
 
@@ -26,7 +26,7 @@ Usage: setup.sh [OPTIONS]
 Options:
   --model NAME      Served model name to write into profiles (default: HCA_MODEL_NAME or local-model)
   --endpoint URL    OpenAI-compatible base URL (default: HCA_ENDPOINT or http://127.0.0.1:8000/v1)
-  --provider NAME   Profile provider key (default: HCA_PROVIDER_NAME or local-vllm)
+  --provider NAME   Profile provider key (default: HCA_PROVIDER_NAME or custom)
   --dry-run         Print actions without changing profiles or kanban
   --force           Overwrite existing profile config.yaml after making a timestamped backup
   -h, --help        Show this help

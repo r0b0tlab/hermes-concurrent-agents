@@ -118,38 +118,9 @@ def dispatch_once_with_spawn(
     **kwargs,
 ):
     """Call Hermes dispatch_once; fail closed if API drifts."""
-    info = assert_dispatch_contract()
+    assert_dispatch_contract()
     kb = import_kanban_db()
     return kb.dispatch_once(conn, spawn_fn=spawn_fn, **kwargs)
-
-
-def default_worker_env(
-    *,
-    hermes_home: str,
-    profile: str,
-    task_id: str,
-    run_id: str,
-    claim_lock: str,
-    board: str,
-    kanban_db: str,
-    workspace: str,
-    workspaces_root: str,
-    extra: Optional[dict[str, str]] = None,
-) -> dict[str, str]:
-    env = {
-        "HERMES_HOME": hermes_home,
-        "HERMES_PROFILE": profile,
-        "HERMES_KANBAN_TASK": task_id,
-        "HERMES_KANBAN_RUN_ID": run_id,
-        "HERMES_KANBAN_CLAIM_LOCK": claim_lock,
-        "HERMES_KANBAN_BOARD": board,
-        "HERMES_KANBAN_DB": kanban_db,
-        "HERMES_KANBAN_WORKSPACE": workspace,
-        "HERMES_KANBAN_WORKSPACES_ROOT": workspaces_root,
-    }
-    if extra:
-        env.update(extra)
-    return env
 
 
 def worker_command(profile: str, task_id: str, *, yolo: bool = False) -> str:

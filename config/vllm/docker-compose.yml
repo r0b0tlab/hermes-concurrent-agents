@@ -7,15 +7,17 @@
 #   export HCA_MODEL_PATH=/path/or/hf-id/of/your/model
 #   export HCA_MODEL_NAME=served-model-name-visible-in-/v1/models
 # Optional:
-#   export HCA_VLLM_IMAGE=vllm/vllm-openai:latest
-#   export HCA_MAX_MODEL_LEN=65536
+#   export HCA_VLLM_IMAGE=vllm/vllm-openai:latest   # or nvcr.io/nvidia/vllm:<tag> (NGC)
+#   export HCA_MAX_MODEL_LEN=65536                  # Hermes requires >=64k context
 #   export HCA_MAX_NUM_SEQS=16
 #   export HCA_GPU_MEMORY_UTILIZATION=0.70
-#   export HCA_EXTRA_VLLM_ARGS="--trust-remote-code"
+#   export HCA_TOOL_CALL_PARSER=hermes              # required for Hermes tool calling
+#   export HCA_EXTRA_VLLM_ARGS="--enable-prefix-caching"
 #
-# MiniMax M2.7 NVFP4 note:
-#   Do not use the legacy FP4 fallback backend for the MM2.7 demo path. Use the
-#   FlashInfer-CUTLASS launch documented in docs/mm27-gb10-demo.md.
+# Long-context note (NVIDIA DGX Spark vLLM playbook): the published 262k-context
+# NVFP4 agent recipe drops --gpu-memory-utilization to 0.4 on 128 GB UMA. Lower
+# HCA_GPU_MEMORY_UTILIZATION when raising HCA_MAX_MODEL_LEN.
+#   https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/vllm
 
 services:
   vllm:
@@ -48,6 +50,8 @@ services:
       --max-model-len ${HCA_MAX_MODEL_LEN:-65536}
       --max-num-seqs ${HCA_MAX_NUM_SEQS:-16}
       --kv-cache-dtype ${HCA_KV_CACHE_DTYPE:-fp8}
+      --enable-auto-tool-choice
+      --tool-call-parser ${HCA_TOOL_CALL_PARSER:-hermes}
       ${HCA_EXTRA_VLLM_ARGS:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]

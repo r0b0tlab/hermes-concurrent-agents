@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
 
 from hca.models import FleetConfig
 from hca.state import StateDB

@@ -1,25 +1,28 @@
-# WARNING: SGLang is EXPERIMENTAL on GB10 (SM121).
-# sgl_kernel has no prebuilt sm121 binaries — requires building from source with CUDA 13.
-# Use vLLM config (config/vllm/) instead for production.
-# See: https://github.com/sgl-project/sglang/issues/11658
+# SGLang OpenAI-compatible backend for concurrent Hermes agents (GB10 / DGX Spark)
 #
-# SGLang with SM121-optimized NVFP4 for GB10/DGX Spark
-# Usage: docker compose up -d
+# Aligned with the NVIDIA DGX Spark SGLang playbook (CUDA 13 image, flashinfer
+# attention backend) and Hermes Agent local-endpoint requirements:
+#   https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/sglang
+#   https://hermes-agent.nousresearch.com/docs/integrations/providers
 #
-# Prerequisites:
-#   - NVIDIA GPU with unified memory (GB10, DGX Spark)
-#   - nvidia-container-toolkit installed
-#   - Model downloaded to HF cache (~/.cache/huggingface)
+# Required:
+#   export HCA_MODEL_PATH=/path/or/hf-id/of/your/model
+#   export HCA_MODEL_NAME=served-model-name-visible-in-/v1/models
+# Optional:
+#   export HCA_SGLANG_IMAGE=lmsysorg/sglang:latest-cu130
+#   export HCA_MAX_MODEL_LEN=65536          # Hermes requires >=64k context for tool use
+#   export HCA_MEM_FRACTION_STATIC=0.75
+#   export HCA_TOOL_CALL_PARSER=qwen        # model-specific; required for Hermes tool calling
+#   export HCA_EXTRA_SGLANG_ARGS="--quantization modelopt_fp4"  # required for NVFP4 models
 #
 # After starting, verify:
 #   curl http://localhost:30000/v1/models
-#   curl http://localhost:30000/v1/chat/completions -d '{"model":"your-served-model-name","messages":[{"role":"user","content":"hello"}]}'
+#   hca doctor --tools
 
 services:
   sglang:
-    image: lmsysorg/sglang:latest
-    container_name: sglang-concurrent
-    runtime: nvidia
+    image: ${HCA_SGLANG_IMAGE:-lmsysorg/sglang:latest-cu130}
+    container_name: ${HCA_CONTAINER_NAME:-sglang-concurrent}
     deploy:
       resources:
         reservations:
@@ -28,21 +31,24 @@ services:
               count: all
               capabilities: [gpu]
     ports:
-      - "30000:30000"
+      - "${HCA_PORT:-30000}:30000"
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
     environment:
-      - FLASHINFER_CUDA_ARCH_LIST=12.1f
-      - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HF_TOKEN:-}
     command: >
-      --model your-served-model-name
-      --mem-fraction-static 0.70
-      --max-model-len 32768
-      --trust-remote-code
-      --quantization modelopt_fp4
-      --port 30000
+      python3 -m sglang.launch_server
+      --model-path ${HCA_MODEL_PATH:?set HCA_MODEL_PATH}
+      --served-model-name ${HCA_MODEL_NAME:?set HCA_MODEL_NAME}
       --host 0.0.0.0
-      --enforce-eager
+      --port 30000
+      --trust-remote-code
+      --attention-backend flashinfer
+      --mem-fraction-static ${HCA_MEM_FRACTION_STATIC:-0.75}
+      --context-length ${HCA_MAX_MODEL_LEN:-65536}
+      --tool-call-parser ${HCA_TOOL_CALL_PARSER:-qwen}
+      --enable-metrics
+      ${HCA_EXTRA_SGLANG_ARGS:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:30000/v1/models"]
       interval: 30s

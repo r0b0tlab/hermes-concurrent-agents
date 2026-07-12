@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import getpass
-import json
 import os
 import shutil
-import subprocess
 from dataclasses import asdict, dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 from hca.backends import openai_compat as oai
 from hca.config import FleetConfig
 from hca.hermes_compat import HermesCompatError, assert_dispatch_contract, hermes_version
-from hca.models import Engine
 from hca.resources import fetch_capacity
 from hca.ssh_exec import run_ssh
 from hca.tmux import TmuxManager
