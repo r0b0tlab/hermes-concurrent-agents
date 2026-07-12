@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-concurrent-agents"
+version = "2.0.0a1"
+description = "GB10-first concurrent Hermes Agent fleet control plane (tmux isolation, Kanban, vLLM/SGLang)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "r0b0tlab" }]
+keywords = ["hermes", "agents", "gb10", "dgx-spark", "vllm", "sglang", "tmux", "kanban"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: System :: Distributed Computing",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.4"]
+
+[project.scripts]
+hca = "hca.cli:main"
+
+[project.entry-points."hermes_agent.plugins"]
+hca = "hca.plugin:register"
+
+[project.urls]
+Homepage = "https://github.com/r0b0tlab/hermes-concurrent-agents"
+Documentation = "https://github.com/r0b0tlab/hermes-concurrent-agents/tree/main/docs"
+Plan = "https://github.com/r0b0tlab/hermes-concurrent-agents/blob/main/docs/plans/2026-07-12-hermes-agent-modernization.md"
+NVIDIAPlaybooks = "https://github.com/NVIDIA/dgx-spark-playbooks"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -1,20 +1,24 @@
 # Changelog
 
-## 1.0.1 - 2026-05-12
+## 2.0.0a1 - 2026-07-12
 
 ### Added
-- 100-point grading rubric and evidence map in `docs/grade/`.
-- Plain-English project status report in `docs/current-state-report.md`.
-- Practical workflow examples in `docs/use-cases.md`.
-- Reproducible benchmark artifact generation with real OpenAI usage-token capture.
-- CI workflow for shell syntax, docs validation, dry-run benchmark, kanban smoke dry-run, and fault-injection dry-run.
-- `scripts/validate-docs.sh`, `scripts/smoke-kanban-flow.sh`, and `scripts/fault-injection-test.sh`.
-- Safer setup guidance: dry-run, force, and config-backup behavior.
+- `hca` Python control plane (`pip install -e .`) — init, doctor, up, ps/watch, peek, activity, explain, cluster SSH inventory
+- GB10 presets: `gb10-vllm`, `gb10-sglang`, `gb10-cluster-vllm`, `gb10-cluster-sglang`, `generic-linux`
+- Equal first-class vLLM + SGLang adapters and capacity admission
+- Durable tmux slot manager (no colon session names; warm idle slots)
+- SQLite reconciliation state DB + leader lock
+- Hermes `dispatch_once(spawn_fn=…)` contract tests
+- NVIDIA playbook alignment docs (`docs/nvidia-playbooks.md`, backends guide)
+- Modernization plan: `docs/plans/2026-07-12-hermes-agent-modernization.md`
 
 ### Changed
-- Benchmarking now distinguishes measured token metrics from synthetic CI dry-runs.
-- Documentation separates tested GB10 evidence from expected/portable behavior.
+- README reoriented to DGX Spark / GB10 first; legacy shell scripts deprecated as wrappers
+- SGLang is first-class (no longer “experimental” in product posture)
 
-## 1.0.0 - 2026-05-12
+### Deprecated
+- Direct use of `scripts/spawn.sh`, `status.sh`, `shutdown.sh` for fleet ops (use `hca`)
 
-Initial public release by @mr-r0b0t — r0b0tlab.
+## 1.0.1 - 2026-05-12
+### Added / Changed
+- Prior shell-based concurrent agent scaffolding (see git history)

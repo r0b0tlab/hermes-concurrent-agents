@@ -1,0 +1,50 @@
+# Single DGX Spark / GB10 — vLLM first-class
+# Networking/install: https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/vllm
+# Hermes local: https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/hermes-agent
+
+preset = "gb10-vllm"
+
+[fleet]
+name = "gb10"
+board = "hca"
+role = "single"
+tmux_socket = "hca-gb10"
+warm_slots = true
+dispatch_interval_seconds = 5.0
+max_wave_size = 4
+
+[backend]
+engine = "vllm"
+endpoint = "http://127.0.0.1:8000/v1"
+model = ""  # set via --model; must match /v1/models id
+api_mode = "openai"
+local_only = true
+# metrics_url = "http://127.0.0.1:8000/metrics"
+
+[capacity]
+max_top_level_runs = 3
+max_total_sequences = 4.0
+memory_high = 0.90
+memory_low = 0.75
+launch_stagger_seconds = 1.5
+max_wave_size = 4
+
+[profiles.slots]
+orchestrator = 1
+coder = 2
+research = 2
+qa = 1
+creative = 1
+
+[delegation]
+max_concurrent_children = 2
+
+[approvals]
+yolo = false
+
+[observe]
+watch_interval_seconds = 2.0
+peek_lines = 40
+
+[retention]
+max_log_bytes_per_run = 20000000

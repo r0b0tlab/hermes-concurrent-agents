@@ -1,0 +1,37 @@
+# Control-plane preset for multi-Spark cluster (SGLang per node default)
+# Prerequisite: NVIDIA connect-* playbooks + passwordless SSH
+
+preset = "gb10-cluster-sglang"
+
+[fleet]
+name = "spark-cluster"
+board = "hca"
+role = "control"
+tmux_socket = "hca-cluster"
+warm_slots = true
+
+[backend]
+engine = "sglang"
+endpoint = "http://127.0.0.1:30000/v1"
+model = ""
+local_only = true
+
+[capacity]
+max_top_level_runs = 3
+max_total_sequences = 4.0
+max_wave_size = 4
+launch_stagger_seconds = 2.0
+
+[cluster]
+transport = "ssh"
+require_same_username = true
+ssh_batch_mode = true
+ssh_control_master = true
+placement_policy = "colocate-infer"
+
+[profiles.slots]
+orchestrator = 1
+coder = 2
+research = 2
+qa = 1
+creative = 1
