@@ -1,25 +1,59 @@
-name: ci
+name: CI
 
 on:
   push:
+    branches: [main, master]
   pull_request:
 
 jobs:
-  static:
+  test-linux:
+    name: Linux unit + smoke
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
-      - name: Install optional shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - name: Bash syntax
-        run: bash -n setup.sh scripts/*.sh
-      - name: ShellCheck
-        run: shellcheck setup.sh scripts/*.sh
-      - name: Docs validation
-        run: bash scripts/validate-docs.sh
-      - name: Benchmark dry run
-        run: bash scripts/benchmark.sh --dry-run --levels 1,2 --output-dir /tmp/hca-bench
-      - name: Kanban smoke dry run
-        run: bash scripts/smoke-kanban-flow.sh --dry-run
-      - name: Fault injection dry run
-        run: bash scripts/fault-injection-test.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Install package
+        run: pip install -e ".[dev]"
+      - name: Unit tests
+        run: pytest -q tests/unit
+      - name: CLI smoke
+        run: |
+          hca version
+          hca presets
+          hca plan --preset generic-linux --json
+          hca bench --dry-run --preset gb10-vllm --model dummy --json
+          hca init --preset generic-linux --model dummy --state-dir /tmp/hca-ci --json
+          hca up --no-dispatch --preset generic-linux --model dummy --state-dir /tmp/hca-ci --json
+          hca ps --preset generic-linux --state-dir /tmp/hca-ci
+          hca drain --state-dir /tmp/hca-ci
+          hca down --state-dir /tmp/hca-ci
+          tmux -L hca-linux kill-server || true
+
+  test-macos-compat:
+    name: macOS compat
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tmux
+        run: brew list tmux || brew install tmux
+      - name: Install package
+        run: pip install -e ".[dev]"
+      - name: Unit tests
+        run: pytest -q tests/unit
+      - name: CLI smoke
+        run: |
+          hca presets
+          hca init --preset generic-linux --model dummy --state-dir /tmp/hca-mac --json
+          hca up --no-dispatch --preset generic-linux --model dummy --state-dir /tmp/hca-mac --json
+          hca ps --preset generic-linux --state-dir /tmp/hca-mac
+          tmux -L hca-linux kill-server || true

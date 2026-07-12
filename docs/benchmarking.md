@@ -1,42 +1,39 @@
-# Benchmarking Guide
+# Benchmarking (v2)
 
-Use `scripts/benchmark.sh` to create reproducible artifact bundles for concurrency sweeps.
+## Purpose
 
-## CI / dry run
+Measure the **knee** of concurrency for a given engine + model + host. Never publish universal worker counts.
 
-```bash
-bash scripts/benchmark.sh --dry-run --levels 1,2
-```
-
-This validates artifact generation without requiring a GPU backend.
-
-## GB10 measured run
-
-`scripts/benchmark.sh` writes `summary.csv`, `metrics.json`, raw request/response JSON, worker logs, and per-level GPU samples. The summary includes throughput plus thermal/power/utilization/memory columns so public claims can cite both speed and operating conditions.
-
-Example:
+## Command
 
 ```bash
-bash scripts/benchmark.sh \
-  --levels 1,2,3,4,6 \
-  --endpoint http://127.0.0.1:8000/v1 \
-  --model your-served-model-name
+hca bench --preset gb10-vllm --model <served> --levels 1,2,3,4,6,8
+hca bench --engine sglang --endpoint http://127.0.0.1:30000/v1 --model <served>
+hca bench --dry-run --levels 1,2,3   # structure only
 ```
 
-Each run creates `benchmarks/YYYYMMDDTHHMMSSZ/` with:
+Writes JSON under `<state_dir>/bench/` and prints:
 
-- `env.txt` — environment manifest
-- `summary.csv` — concurrency-level summary with throughput, power, utilization, memory, and thermals
-- `metrics.json` — structured aggregate metrics
-- `raw/` — per-worker request/response JSON
-- `logs/` — per-worker curl/backend logs and `level-*-gpu-before.csv` / `level-*-gpu-samples.csv` / `level-*-gpu-after.csv` samples
+- per-level success/fail, p50/p95 latency, throughput
+- `recommended_max_sequences` + `knee_reason`
 
-The benchmark uses OpenAI-compatible response `usage` fields when the backend returns them. If usage is missing, token totals are reported as zero rather than guessed.
+## Suites
 
-## Release evidence rule
+1. Raw OpenAI chat sweep (implemented by `hca bench`)
+2. Optional: Hermes one-shot worker sweep (future / scripts)
+3. Optional: full Kanban+tmux fleet stress (manual)
 
-Public speed claims must cite a benchmark artifact directory and distinguish:
+## Applying results
 
-- measured on GB10
-- dry-run validation
-- expected / estimated behavior
+Set in preset or config:
+
+```toml
+[capacity]
+max_top_level_runs = <knee>
+max_total_sequences = <knee>
+max_wave_size = min(4, knee)
+```
+
+## Engines
+
+Run benches **separately** for vLLM and SGLang; knees differ.

@@ -1,24 +1,32 @@
 # Changelog
 
-## 2.0.0a1 - 2026-07-12
+## 2.0.0 - 2026-07-12
+
+Complete v2 control plane for GB10 / DGX Spark concurrent Hermes fleets.
 
 ### Added
-- `hca` Python control plane (`pip install -e .`) — init, doctor, up, ps/watch, peek, activity, explain, cluster SSH inventory
-- GB10 presets: `gb10-vllm`, `gb10-sglang`, `gb10-cluster-vllm`, `gb10-cluster-sglang`, `generic-linux`
-- Equal first-class vLLM + SGLang adapters and capacity admission
-- Durable tmux slot manager (no colon session names; warm idle slots)
-- SQLite reconciliation state DB + leader lock
-- Hermes `dispatch_once(spawn_fn=…)` contract tests
-- NVIDIA playbook alignment docs (`docs/nvidia-playbooks.md`, backends guide)
-- Modernization plan: `docs/plans/2026-07-12-hermes-agent-modernization.md`
+- `hca` CLI: init, doctor, up/drain/down, ps/watch, peek/attach/logs, activity/transcript/inspect/explain, plan, bench, task, cluster, dashboard
+- Durable tmux slots (`hca-<fleet>-<role>-NN`), warm idle slots, leader lock
+- SQLite control-plane state + activity stream + drain flag
+- Hermes Kanban `dispatch_once(spawn_fn=…)` tmux adapter
+- Equal first-class **vLLM** and **SGLang** adapters + capacity admission
+- Workspaces (git worktree / shared-readonly / none by role)
+- Subagent budget plugin hook
+- Full concurrency bench harness with knee detection
+- Cluster inventory over **passwordless SSH** (NVIDIA playbook-aligned)
+- Presets: gb10-vllm, gb10-sglang, gb10-cluster-*, generic-linux
+- Docs: architecture, operations, observability, cluster, backends, NVIDIA index, isolation, subagents, benchmarking
+- CI: Ubuntu primary (3.11/3.12) + macOS compat
+- Unit + Hermes contract tests
 
 ### Changed
-- README reoriented to DGX Spark / GB10 first; legacy shell scripts deprecated as wrappers
-- SGLang is first-class (no longer “experimental” in product posture)
+- Product default path is DGX Spark / GB10 (not laptop folklore)
+- SGLang is first-class (not experimental)
+- Legacy shell scripts deprecated as wrappers → `hca`
 
-### Deprecated
-- Direct use of `scripts/spawn.sh`, `status.sh`, `shutdown.sh` for fleet ops (use `hca`)
+### Removed / superseded
+- Stale INTEGRATION_PLAN content (pointer only)
+- Fixed universal “N=3 workers” guidance
 
-## 1.0.1 - 2026-05-12
-### Added / Changed
-- Prior shell-based concurrent agent scaffolding (see git history)
+## 1.0.x
+- Prior shell-based scaffolding (see git history)

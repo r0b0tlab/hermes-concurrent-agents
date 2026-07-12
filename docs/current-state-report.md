@@ -1,112 +1,27 @@
-# Current state report
+# Current state (2026-07-12)
 
-`hermes-concurrent-agents` is a small local agent swarm for Hermes Agent.
+## Product
 
-The idea is simple: keep one local model server running, then let several Hermes workers use it at the same time. One worker can research. Another can write code. Another can review. Another can write docs. They coordinate through Hermes kanban instead of fighting over the same chat window or the same files.
+`hermes-concurrent-agents` **v2.0.0a1** — GB10-first control plane (`hca`) for concurrent isolated Hermes sessions on vLLM/SGLang.
 
-This repo targets unified-memory machines first, especially NVIDIA GB10 / DGX Spark. Apple Silicon and other large-memory systems can use the same pattern, although the performance numbers will differ.
+## Implemented
 
-## Why this exists
+- Python package + CLI: init, doctor, up/drain/down, ps/watch, peek/attach/logs, activity/transcript/inspect/explain, plan, bench, task, cluster, dashboard
+- Durable tmux slots, state DB, leader lock, drain flag
+- Kanban `dispatch_once(spawn_fn=tmux)` adapter
+- vLLM + SGLang equal first-class adapters + admission
+- Workspaces (worktree policy)
+- Subagent budget plugin hook
+- GB10 / cluster presets; NVIDIA playbook alignment docs
+- CI: Ubuntu primary + macOS compat
+- Unit + Hermes contract tests
 
-Most agent work is naturally parallel.
+## Authoritative plan
 
-A single agent usually does work in a line: research, plan, code, test, document, review. That is easy to follow, but slow. Human teams do not work that way when the work can be split. A researcher can gather context while an engineer builds. A QA person can review one piece while someone else writes docs.
+[docs/plans/2026-07-12-hermes-agent-modernization.md](plans/2026-07-12-hermes-agent-modernization.md)
 
-This project gives Hermes Agent that kind of structure on one local machine.
+## Superseded
 
-## Architecture
-
-The usual GB10 setup looks like this:
-
-```text
-vLLM / OpenAI-compatible API on :8000
-  -> creative-worker
-  -> coder-worker
-  -> research-worker
-  -> qa-worker
-  -> orchestrator
-       -> delegate_task subagents when needed
-```
-
-The model server stays loaded once. Workers are separate Hermes profiles, usually started in tmux sessions. The shared task board is Hermes kanban, backed by SQLite.
-
-That separation matters. Each worker has its own config, memory, session history, and role file. The shared board gives the swarm task ownership, dependency tracking, stale task recovery, and an audit trail.
-
-## Worker roles
-
-- `creative-worker`: reports, docs, summaries, stories, launch posts
-- `coder-worker`: implementation, scripts, automation, fixes
-- `research-worker`: source gathering, comparisons, papers, technical analysis
-- `qa-worker`: tests, review, verification, fact checking
-- `orchestrator`: planning, decomposition, routing, acceptance checks
-
-## Current grade
-
-The repo now has a documented 100/100 repository-readiness score.
-
-That score means the project has the expected public-release machinery: docs, setup flow, benchmark artifact generation, CI, smoke tests, safety checks, and a written rubric.
-
-It does not mean every hardware performance claim has been externally reproduced. Real speed claims should cite a benchmark artifact directory from `benchmarks/YYYYMMDDTHHMMSSZ/`.
-
-## Tested results
-
-Known GB10 notes:
-
-- 1 agent: about 23 tok/s
-- 3 agents: about 69 tok/s total, about 23 tok/s per agent
-- GPU memory: about 85.9GB with 0.70 memory fraction, 64K context, FP8 KV cache
-
-The README includes expected 4-worker and 6-worker rows, but those should stay marked as estimates until a real benchmark run produces artifacts for them.
-
-## Validation status
-
-These checks passed locally during the gap-closure pass:
-
-```bash
-bash -n setup.sh scripts/*.sh
-bash scripts/validate-docs.sh
-bash scripts/benchmark.sh --dry-run --levels 1,2
-bash scripts/smoke-kanban-flow.sh
-bash scripts/smoke-kanban-flow.sh --dry-run
-bash scripts/fault-injection-test.sh
-bash scripts/health-monitor.sh --once
-```
-
-A code-quality/safety subagent approved the shell and docs changes. A separate spec-review subagent timed out, so it is not counted as evidence.
-
-## What changed in the release-readiness pass
-
-Added:
-
-- `docs/grade/rubric.md`
-- `docs/grade/current-score.md`
-- `docs/grade/evidence-map.md`
-- `docs/benchmarking.md`
-- `docs/durability-tests.md`
-- `docs/use-cases.md`
-- `docs/current-state-report.md`
-- `scripts/validate-docs.sh`
-- `scripts/smoke-kanban-flow.sh`
-- `scripts/fault-injection-test.sh`
-- `.github/workflows/ci.yml`
-- `CHANGELOG.md`
-- `CONTRIBUTING.md`
-- `benchmarks/.gitkeep`
-
-Improved:
-
-- safer `setup.sh` with `--dry-run`, `--force`, dependency checks, config preservation, and timestamped backups
-- real benchmark artifact generation in `scripts/benchmark.sh`
-- readiness checks in `scripts/spawn.sh`
-- `--once` and safer NVIDIA memory parsing in `scripts/health-monitor.sh`
-- clearer deployment docs: vLLM is canonical on GB10; SGLang is experimental on SM121
-
-## What to do next
-
-The repo is ready for a clean benchmark evidence run.
-
-```bash
-bash scripts/benchmark.sh   --levels 1,2,3,4,6   --endpoint http://127.0.0.1:8000/v1   --model your-served-model-name
-```
-
-Then update the README performance table so every number is either measured with an artifact path or clearly marked estimated.
+- Stale INTEGRATION_PLAN → pointer only
+- Fixed “3 workers” folklore → measure with `hca bench`
+- SGLang “experimental” → first-class

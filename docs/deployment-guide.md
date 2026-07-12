@@ -1,181 +1,54 @@
-# Deployment Guide
+# Deployment guide (v2)
 
-Step-by-step guide to deploying concurrent Hermes agents on a local OpenAI-compatible model backend.
+## Targets
 
-The repo is model-agnostic: you choose the model, endpoint, and runtime flags. The only hard requirement is that your backend exposes `/v1/models` and `/v1/chat/completions` and that every Hermes profile uses the exact served model name.
+| Priority | Platform |
+|---|---|
+| P0 | Single DGX Spark / GB10 |
+| P0 | Spark cluster (QSFP + passwordless SSH) |
+| P1 | Other Linux high-memory hosts |
+| P2 | macOS (CLI/dev only) |
 
-## Phase 1: Choose a Model and Endpoint
-
-Set these values once and reuse them for setup, checks, benchmarks, and demos:
-
-```bash
-export HCA_ENDPOINT=http://127.0.0.1:8000/v1
-export HCA_MODEL_NAME=your-served-model-name
-export HCA_PROVIDER_NAME=local-vllm
-```
-
-`HCA_MODEL_NAME` must match the model id returned by:
+## Install
 
 ```bash
-curl "$HCA_ENDPOINT/models"
-```
-
-## Phase 2: Start an Inference Backend
-
-### Option A: vLLM
-
-Generic vLLM launch shape:
-
-```bash
-export HCA_MODEL_PATH=/path/or/hf-id/of/your/model
-export HCA_MODEL_NAME=your-served-model-name
-
-python3 -m vllm.entrypoints.openai.api_server \
-  --model "$HCA_MODEL_PATH" \
-  --served-model-name "$HCA_MODEL_NAME" \
-  --host 0.0.0.0 --port 8000 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.70 \
-  --max-model-len 65536 \
-  --max-num-seqs 16
-```
-
-Add only the backend-specific flags required by your chosen model/runtime. Do not copy kernel flags from another model family without verifying server logs.
-
-Docker Compose path:
-
-```bash
-export HCA_MODEL_PATH=/path/or/hf-id/of/your/model
-export HCA_MODEL_NAME=your-served-model-name
-docker compose -f config/vllm/docker-compose.yml up -d
-```
-
-### Option B: Other OpenAI-compatible servers
-
-Any local server that exposes `/v1/chat/completions` works. Ollama, llama.cpp, SGLang, etc.:
-
-```bash
-export HCA_ENDPOINT=http://127.0.0.1:11434/v1
-export HCA_MODEL_NAME=llama3.1:8b
-```
-
-## Phase 3: Verify Backend
-
-```bash
-bash scripts/check-backend.sh \
-  --endpoint "$HCA_ENDPOINT" \
-  --model "$HCA_MODEL_NAME"
-```
-
-This validates `/v1/models` and one small chat completion.
-
-## Phase 4: Profile Setup
-
-```bash
+git clone https://github.com/r0b0tlab/hermes-concurrent-agents.git
 cd hermes-concurrent-agents
-bash setup.sh \
-  --model "$HCA_MODEL_NAME" \
-  --endpoint "$HCA_ENDPOINT" \
-  --provider "$HCA_PROVIDER_NAME" \
-  --force
+pip install -e ".[dev]"
+# Hermes Agent must be installed and on PATH
 ```
 
-This creates/updates five isolated profiles:
+## Backends
 
-- `creative-worker`
-- `coder-worker`
-- `research-worker`
-- `qa-worker`
-- `orchestrator`
+Equal first-class:
 
-Existing profile configs are preserved unless `--force` is passed; forced replacement creates timestamped backups.
+- **vLLM** — typically `http://127.0.0.1:8000/v1` — [playbook](https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/vllm)
+- **SGLang** — typically `http://127.0.0.1:30000/v1` — [playbook](https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/sglang)
 
-Verify local-only configuration:
+Presets: `gb10-vllm`, `gb10-sglang`, `gb10-cluster-vllm`, `gb10-cluster-sglang`, `generic-linux`.
 
-```bash
-bash scripts/verify-local-only.sh \
-  --endpoint "$HCA_ENDPOINT" \
-  --provider "$HCA_PROVIDER_NAME" \
-  --model "$HCA_MODEL_NAME"
-```
+## Profiles / slots
 
-## Phase 5: Spawn Workers
+`hca init` creates per-slot Hermes profiles under `~/.hermes/profiles/hca-<fleet>-<role>-NN` with local OpenAI-compatible provider config.
 
-```bash
-bash scripts/spawn.sh 3
-bash scripts/status.sh
-```
+## State
 
-## Phase 6: Create Tasks
+`~/.hca/<fleet>/` (override with `--state-dir`):
 
-Manual CLI examples:
+- `hca.sqlite` — control mappings (not Kanban truth)
+- `fleet.resolved.json`
+- `logs/`
+- `worktrees/`
+- `nodes.json` (cluster)
+- `DRAIN` flag
 
-```bash
-hermes kanban create "Research requirements" --assignee research-worker
-hermes kanban create "Implement the script" --assignee coder-worker
-hermes kanban create "Write launch copy" --assignee creative-worker
-hermes kanban create "Test and verify" --assignee qa-worker
-```
+## Security
 
-From the orchestrator pane:
+- Default local-only endpoints
+- Do not expose OpenAI ports on untrusted networks
+- Redaction on peek/transcript
+- Approvals: `--yolo` only when intentionally unattended
 
-```bash
-tmux send-keys -t hca-1 "Break down this project into kanban tasks for coder, research, creative, and QA workers. Require QA PASS before final report." Enter
-```
+## Legacy shell scripts
 
-## Phase 7: Benchmark
-
-```bash
-bash scripts/benchmark.sh \
-  --levels 1,2,3,4 \
-  --endpoint "$HCA_ENDPOINT" \
-  --model "$HCA_MODEL_NAME"
-```
-
-Report only numbers backed by the generated artifact directory.
-
-## Phase 8: Monitor and Shutdown
-
-```bash
-bash scripts/status.sh
-hermes kanban list
-nvidia-smi -l 5
-
-bash scripts/shutdown.sh
-```
-
-## Troubleshooting
-
-### Backend not reachable
-
-- Confirm server is running.
-- Check `curl "$HCA_ENDPOINT/models"`.
-- Ensure the URL includes `/v1` when required by your backend.
-
-### Hermes returns model-not-found
-
-- Your profile `model.default` does not match `/v1/models`.
-- Re-run `setup.sh --model "$HCA_MODEL_NAME" --endpoint "$HCA_ENDPOINT" --force`.
-
-### Workers use a remote provider
-
-Run:
-
-```bash
-bash scripts/verify-local-only.sh --endpoint "$HCA_ENDPOINT" --provider "$HCA_PROVIDER_NAME" --model "$HCA_MODEL_NAME"
-```
-
-Fix every failing profile before claiming the team is fully local.
-
-### OOM errors
-
-- Reduce max context.
-- Reduce concurrency.
-- Lower backend memory utilization.
-- Stop unrelated GPU processes before recording.
-
-### Slow inference
-
-- Warm the backend before the real run.
-- Benchmark 1, 2, 3, and 4 workers to find your hardware's sweet spot.
-- Check that backend logs show the optimized path for your chosen model/runtime.
+`setup.sh` and `scripts/*.sh` remain for compatibility; prefer `hca`.

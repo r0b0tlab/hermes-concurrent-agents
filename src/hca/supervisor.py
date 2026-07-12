@@ -24,6 +24,9 @@ class Supervisor:
         self.tmux = TmuxManager(cfg.tmux_socket)
         self._lock_fd: Optional[int] = None
 
+    def is_draining(self) -> bool:
+        return (self.state_dir / "DRAIN").exists()
+
     def acquire_leadership(self) -> bool:
         fd = self.db.try_leader_lock()
         if fd is None:
@@ -71,6 +74,13 @@ class Supervisor:
         return {"slots": rows, "capacity": fetch_capacity(self.cfg).to_dict()}
 
     def can_admit(self, credits: float = 1.0) -> dict:
+        if self.is_draining():
+            return {
+                "allowed": False,
+                "reason": "waiting: fleet drain active (hca drain --clear to resume)",
+                "credits": credits,
+                "capacity": fetch_capacity(self.cfg).to_dict(),
+            }
         decision = admit(self.cfg, self.db, credits=credits)
         return decision.to_dict()
 
@@ -81,9 +91,10 @@ class Supervisor:
             if self.cfg.warm_slots:
                 self.warm_slots()
             report = self.reconcile()
-            decision = admit(self.cfg, self.db)
-            report["admission"] = decision.to_dict()
-            if dispatch and decision.allowed:
+            decision_dict = self.can_admit()
+            report["admission"] = decision_dict
+            allowed = bool(decision_dict.get("allowed"))
+            if dispatch and allowed:
                 try:
                     report["dispatch"] = dispatch_tick(self.cfg, self.db, self.tmux)
                 except Exception as exc:
@@ -91,17 +102,16 @@ class Supervisor:
             elif dispatch:
                 report["dispatch"] = {
                     "skipped": True,
-                    "reason": decision.reason,
+                    "reason": decision_dict.get("reason"),
                 }
             report["ok"] = True
-            # Ensure env for plugin on this process
+            report["drain"] = self.is_draining()
             os.environ.setdefault("HCA_STATE_DB", str(self.state_dir / "hca.sqlite"))
             os.environ.setdefault(
                 "HCA_MAX_SUBAGENT_CREDITS", str(self.cfg.delegation_max_children)
             )
             return report
         finally:
-            # keep lock for long-running daemon; release only for one-shot tick
             self.release_leadership()
 
     def run_forever(self) -> None:
@@ -116,8 +126,8 @@ class Supervisor:
             )
             while True:
                 self.reconcile()
-                decision = admit(self.cfg, self.db)
-                if decision.allowed:
+                decision = self.can_admit()
+                if decision.get("allowed"):
                     try:
                         dispatch_tick(self.cfg, self.db, self.tmux)
                     except Exception as exc:
