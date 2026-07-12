@@ -2,7 +2,7 @@
 
 ## Product
 
-`hermes-concurrent-agents` **v2.0.0a1** — GB10-first control plane (`hca`) for concurrent isolated Hermes sessions on vLLM/SGLang.
+`hermes-concurrent-agents` **v2.0.0** — GB10-first control plane (`hca`) for concurrent isolated Hermes sessions on vLLM/SGLang.
 
 ## Implemented
 
@@ -13,7 +13,7 @@
 - Workspaces (worktree policy)
 - Subagent budget plugin hook
 - GB10 / cluster presets; NVIDIA playbook alignment docs
-- CI: Ubuntu primary + macOS compat
+- CI: Linux GitHub runners for unit/smoke only (not a GB10/perf substitute); validate on Spark with `hca doctor` / `bench`
 - Unit + Hermes contract tests
 
 ## Authoritative plan

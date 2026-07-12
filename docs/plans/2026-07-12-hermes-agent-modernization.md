@@ -1063,8 +1063,9 @@ python -m hca.cli docs-check
 - Modify: `CHANGELOG.md`, `CONTRIBUTING.md`
 
 **CI matrix:**
-- Ubuntu Linux (primary): Python versions, real tmux integration, fake backend E2E, **vLLM+SGLang adapter unit tests**, shell wrappers, Ruff, mypy, pytest.
-- macOS (compat only): CLI/config/status/telemetry/tmux/worktree integration — not performance authority.
+- Linux GitHub runners only: unit tests, CLI smoke, tmux integration on portable paths. This is a **regression gate**, not a product platform claim.
+- **Not** a macOS CI matrix — product target is DGX Spark / GB10 Linux; laptop macOS is optional local dev only.
+- **GB10 / on-device validation** (required for release claims about engines, concurrency, cluster): `hca doctor`, `hca bench` (vLLM and SGLang separately), fleet smoke, passwordless-SSH cluster smoke. GitHub-hosted Ubuntu is not a substitute for Spark hardware.
 - Hermes contract: minimum supported release and current upstream main (allowed-failure initially, required before stable v2).
 - Security: secret scan, dependency audit, process-argument redaction test.
 - Optional hardware workflow: GB10 self-hosted runner for real vLLM and/or SGLang knee measurements (manual or labeled jobs).
@@ -1080,7 +1081,7 @@ python -m hca.cli docs-check
 8. Validate with `hca doctor` and one fake/smoke task.
 9. Keep rollback instructions and old wrappers for one release.
 
-**Release gates:** all tests green; Linux primary CI green; docs links valid; real supervisor restart test passes; **at least one GB10-measured artifact for vLLM and one for SGLang when claiming dual-engine support** (or clearly mark engine support as “code-complete, measurement pending”); cluster smoke over **passwordless SSH** (2-node or mocked SSH exec) passes before “cluster-ready” claims; compatibility contract verified against current Hermes.
+**Release gates:** unit/smoke green on Linux CI; docs accurate; real supervisor restart test passes on a Linux host; **at least one GB10-measured artifact for vLLM and one for SGLang when claiming dual-engine support** (or clearly mark “code-complete, measurement pending”); cluster smoke over **passwordless SSH** on real Sparks (or mocked SSH unit tests) before “cluster-ready” claims; Hermes `dispatch_once(spawn_fn=…)` contract verified. GitHub Ubuntu is never sufficient alone for engine/throughput claims.
 
 **Commit:** `ci: gate HCA v2 across Linux and macOS`
 

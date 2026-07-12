@@ -16,7 +16,7 @@ Complete v2 control plane for GB10 / DGX Spark concurrent Hermes fleets.
 - Cluster inventory over **passwordless SSH** (NVIDIA playbook-aligned)
 - Presets: gb10-vllm, gb10-sglang, gb10-cluster-*, generic-linux
 - Docs: architecture, operations, observability, cluster, backends, NVIDIA index, isolation, subagents, benchmarking
-- CI: Ubuntu primary (3.11/3.12) + macOS compat
+- CI: Linux GitHub runners for unit/smoke only; GB10 validation is on-device (`hca doctor` / `bench` / fleet smoke)
 - Unit + Hermes contract tests
 
 ### Changed
