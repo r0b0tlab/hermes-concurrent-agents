@@ -1083,7 +1083,7 @@ python -m hca.cli docs-check
 
 **Release gates:** unit/smoke green on Linux CI; docs accurate; real supervisor restart test passes on a Linux host; **at least one GB10-measured artifact for vLLM and one for SGLang when claiming dual-engine support** (or clearly mark “code-complete, measurement pending”); cluster smoke over **passwordless SSH** on real Sparks (or mocked SSH unit tests) before “cluster-ready” claims; Hermes `dispatch_once(spawn_fn=…)` contract verified. GitHub Ubuntu is never sufficient alone for engine/throughput claims.
 
-**Commit:** `ci: gate HCA v2 across Linux and macOS`
+**Commit:** `ci: Linux unit/smoke gate; GB10 validation on-device`
 
 ---
 
