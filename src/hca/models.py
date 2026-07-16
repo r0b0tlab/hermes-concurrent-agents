@@ -124,7 +124,9 @@ class FleetConfig:
             "creative": 1,
         }
     )
-    delegation_max_children: int = 2
+    # Default: no worker subagents. Durable parallel work must be visible in
+    # Kanban; delegate_task is disabled unless explicitly opted in.
+    delegation_max_children: int = 0
     approvals_yolo: bool = False
     preset: str = ""
 

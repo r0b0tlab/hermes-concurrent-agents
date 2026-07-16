@@ -92,8 +92,19 @@ class RunRecord:
 class StateDB:
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # HCA state can contain prompts, paths, and run metadata. Tighten an
+        # existing permissive directory rather than relying on the caller's
+        # umask; never make it more permissive.
+        self.path.parent.chmod(self.path.parent.stat().st_mode & ~0o077)
         self._init()
+        self._tighten_db_files()
+
+    def _tighten_db_files(self) -> None:
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(str(self.path) + suffix)
+            if candidate.exists():
+                candidate.chmod(0o600)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), timeout=30)
@@ -103,11 +114,27 @@ class StateDB:
         return conn
 
     def _init(self) -> None:
+        from hca.migrations import (
+            CURRENT_SCHEMA_VERSION,
+            apply_migrations,
+            current_version,
+        )
+
         with self._connect() as conn:
+            # Base (v1) schema is idempotent CREATE IF NOT EXISTS.
             conn.executescript(SCHEMA)
-            conn.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', '1')"
-            )
+            ver = current_version(conn)
+            if ver == 0:
+                # Fresh DB: stamp the base version, then apply forward
+                # migrations to reach CURRENT (adds run projection tables).
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', '1')"
+                )
+                conn.commit()
+        # Migrate forward transactionally (own connection/txn per step). This
+        # never resets the version marker and refuses unknown future versions.
+        with self._connect() as conn:
+            apply_migrations(self.path, conn, target=CURRENT_SCHEMA_VERSION)
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -176,6 +203,21 @@ class StateDB:
             row = conn.execute(
                 "SELECT * FROM runs WHERE board=? AND run_id=?",
                 (board, run_id),
+            ).fetchone()
+        return self._row_to_run(row) if row else None
+
+    def latest_run_for_task(self, board: str, task_id: str) -> Optional[RunRecord]:
+        """Most-recent HCA run mapping for a task, regardless of status.
+
+        Used to recover the integer run id + bound worker pid that were
+        captured at spawn time — proof-of-execution evidence that upstream
+        nulls off the task row when the run completes.
+        """
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM runs WHERE board=? AND task_id=? "
+                "ORDER BY started_at DESC LIMIT 1",
+                (board, task_id),
             ).fetchone()
         return self._row_to_run(row) if row else None
 
@@ -308,6 +350,20 @@ class StateDB:
                     "SELECT COALESCE(SUM(credits),0) AS c FROM leases"
                 ).fetchone()
         return float(row["c"] if row else 0.0)
+
+    def get_meta(self, key: str, default: str = "") -> str:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (key,)
+            ).fetchone()
+        return row["value"] if row else default
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                (key, value),
+            )
 
     def leader_lock_path(self) -> Path:
         return self.path.parent / "leader.lock"

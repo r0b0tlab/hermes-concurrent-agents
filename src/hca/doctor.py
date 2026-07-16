@@ -145,6 +145,16 @@ def run_doctor(cfg: FleetConfig, *, tools_probe: bool = False) -> DoctorReport:
     cap = fetch_capacity(cfg)
     _add(checks, "backend.capacity", cap.healthy, cap.detail, severity="warn" if not cap.healthy else "info")
 
+    # Device adapter selection (capability-driven; generic imports no vendor libs)
+    try:
+        from hca.devices import probe_device
+
+        dev, dev_reason = probe_device(disk_path=cfg.state_dir or None)
+        compat["device"] = {"selected": dev.adapter, "reason": dev_reason, "signals": dev.to_dict()}
+        _add(checks, "device.adapter", True, f"{dev.adapter} ({dev_reason}); {dev.detail}", "info")
+    except Exception as exc:
+        _add(checks, "device.adapter", True, f"device probe failed: {exc}", "warn")
+
     # state dir writable
     try:
         os.makedirs(cfg.state_dir, exist_ok=True)

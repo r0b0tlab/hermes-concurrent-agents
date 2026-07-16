@@ -175,6 +175,7 @@ def make_tmux_spawn_fn(
             slot,
             spec.command(),
             env=spec.env(),
+            unset_env=["HERMES_TUI"],
             workdir=str(workspace) if workspace else None,
             log_path=str(log_path(cfg.state_dir, str(run_id))),
         )

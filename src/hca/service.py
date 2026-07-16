@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Optional, Protocol
 
 from hca.config import FleetConfig
+from hca.evidence import ExecutionEvidence, derive_final_state
 from hca.result import Artifact, RunResult, build_result
 from hca.run import (
     RunBudgets,
@@ -29,6 +30,7 @@ from hca.run import (
     RunState,
     RunStateError,
     RunStore,
+    can_transition,
     new_run_id,
 )
 
@@ -58,25 +60,29 @@ class ServiceResult:
 class Orchestrator(Protocol):
     """Plan/execute seam. Implementations must never fabricate completion.
 
-    ``execute`` returns the final state, or ``(state, reason)`` to attach a
-    human/agent-readable reason. Any returned ``completed`` is validated to
-    pass through review — the seam cannot forge success.
+    ``plan`` returns the post-planning run state (``PLANNING`` to proceed,
+    ``NEEDS_INPUT`` to gate on a question, ``BLOCKED`` when the planner graph
+    is invalid). ``execute`` returns :class:`ExecutionEvidence` describing the
+    *observed* upstream tasks — the terminal state is then *derived* from that
+    evidence by :func:`hca.evidence.derive_final_state`, so an implementation
+    (or a test double) cannot hand back a bare ``completed`` enum. To report
+    success it must produce real terminal tasks carrying a run id, a bound pid,
+    and a result/artifact.
     """
 
     def plan(self, spec: RunSpec, store: RunStore) -> RunState:
         ...
 
-    def execute(self, spec: RunSpec, store: RunStore) -> "RunState | tuple[RunState, str]":
+    def execute(self, spec: RunSpec, store: RunStore) -> ExecutionEvidence:
         ...
 
 
 class PreflightOrchestrator:
-    """Default honest orchestrator.
+    """Default honest orchestrator when no real Kanban backend is available.
 
     It performs planning bookkeeping but does not start model servers or
-    workers (reserved for the supervisor + a configured backend). Absent an
-    admitted execution path it leaves the run ``blocked`` with remediation,
-    rather than claiming success.
+    workers. Absent an admitted execution path it returns *empty* evidence,
+    which derives to ``blocked`` with remediation — it never claims success.
     """
 
     def __init__(self, cfg: Optional[FleetConfig] = None):
@@ -90,13 +96,35 @@ class PreflightOrchestrator:
         )
         return RunState.PLANNING
 
-    def execute(self, spec: RunSpec, store: RunStore):
+    def execute(self, spec: RunSpec, store: RunStore) -> ExecutionEvidence:
         reason = (
-            "no admitted execution backend — configure a Hermes endpoint and "
-            "start the supervisor (`hca up`) so tasks can be dispatched"
+            "no admitted execution backend — a configured Hermes installation "
+            "with an importable kanban_db and a board is required so `hca run` "
+            "can submit durable work; start the supervisor (`hca up`)"
         )
         store.append_event(spec.run_id, "run.preflight", reason)
-        return RunState.BLOCKED, reason
+        return ExecutionEvidence(reason=reason)
+
+
+def _default_orchestrator(cfg: FleetConfig, store: RunStore):
+    """Pick the real Kanban orchestrator when the prerequisites are valid.
+
+    The controller's rule: `hca run` must submit durable real work when a
+    valid configured Hermes install is present, and must *not* default-block
+    in that case. We only fall back to the honest preflight block when Hermes
+    is not importable or no board is configured.
+    """
+    from hca.hermes_compat import HermesCompatError, import_kanban_db
+
+    if not cfg.board:
+        return PreflightOrchestrator(cfg)
+    try:
+        import_kanban_db()
+    except HermesCompatError:
+        return PreflightOrchestrator(cfg)
+    from hca.kanban_orchestrator import KanbanOrchestrator
+
+    return KanbanOrchestrator(cfg, board=cfg.board)
 
 
 class FleetService:
@@ -113,7 +141,7 @@ class FleetService:
         state_dir = Path(cfg.state_dir or "~/.hca").expanduser()
         state_dir.mkdir(parents=True, exist_ok=True)
         self.store = store or RunStore(state_dir / "hca.sqlite")
-        self.orchestrator = orchestrator or PreflightOrchestrator(cfg)
+        self.orchestrator = orchestrator or _default_orchestrator(cfg, self.store)
 
     # --- run ---
 
@@ -203,43 +231,127 @@ class FleetService:
             self.store.set_state(spec.run_id, RunState.PLANNING, reason="planning")
             planned = self.orchestrator.plan(spec, self.store)
             if planned == RunState.NEEDS_INPUT:
-                self.store.set_state(spec.run_id, RunState.NEEDS_INPUT, reason="planner needs input")
+                self.store.set_state(
+                    spec.run_id, RunState.NEEDS_INPUT, reason="planner needs input"
+                )
+            elif planned == RunState.BLOCKED:
+                proj_now = self.store.get_run(spec.run_id)
+                self.store.set_state(
+                    spec.run_id, RunState.BLOCKED,
+                    reason=proj_now.reason or "planner produced no dispatchable graph",
+                )
             else:
-                outcome = self.orchestrator.execute(spec, self.store)
-                # execute may return a bare state or (state, reason).
-                if isinstance(outcome, tuple):
-                    final, final_reason = outcome
-                else:
-                    final, final_reason = outcome, ""
-                # Honor exactly what the orchestrator reports; validate the
-                # transition so a bad orchestrator cannot forge `completed`.
-                self._apply_final(spec.run_id, final, reason=final_reason)
+                evidence = self.orchestrator.execute(spec, self.store)
+                self._reconcile_from_evidence(spec, evidence)
         except RunStateError as exc:
             self.store.set_state(spec.run_id, RunState.FAILED, reason=str(exc))
         except Exception as exc:  # pragma: no cover - defensive
-            self.store.set_state(spec.run_id, RunState.FAILED, reason=f"orchestrator error: {exc}")
+            self.store.set_state(
+                spec.run_id, RunState.FAILED, reason=f"orchestrator error: {exc}"
+            )
 
         proj = self.store.get_run(spec.run_id)
         return self._status_result("run", proj)
 
-    def _apply_final(self, run_id: str, final: RunState, *, reason: str = "") -> None:
-        proj = self.store.get_run(run_id)
-        if proj is None:
-            return
-        # Route through review when required by the target state.
+    def _reconcile_from_evidence(
+        self, spec: RunSpec, evidence: ExecutionEvidence
+    ) -> None:
+        """Derive the terminal run state from *observed upstream evidence*.
+
+        Completion is never taken on the orchestrator's word: it is derived by
+        :func:`derive_final_state`, which requires real terminal tasks with a
+        run id, a bound pid, and a result/artifact. The transitions here only
+        reflect what the evidence proves.
+        """
+        final, reason = derive_final_state(spec, evidence)
+        self.store.append_event(
+            spec.run_id, "run.evidence", reason,
+            {"final": final.value, "evidence": evidence.to_dict()},
+        )
+        # Reflect that execution was attempted before recording the outcome.
+        proj = self.store.get_run(spec.run_id)
+        if proj is not None and proj.state == RunState.PLANNING:
+            self.store.set_state(spec.run_id, RunState.RUNNING, reason="executing on kanban")
+
         if final == RunState.COMPLETED:
-            # completion is only legal from running/review/stopping — pass
-            # through running→review→completed so it can never skip verify.
-            self.store.set_state(run_id, RunState.RUNNING, reason="executing")
-            self.store.set_state(run_id, RunState.REVIEW, reason="verifying")
-            self.store.set_state(run_id, RunState.COMPLETED, reason=reason or "accepted")
-        elif final == RunState.RUNNING:
-            self.store.set_state(run_id, RunState.RUNNING, reason=reason or "executing")
+            # If an independent reviewer participated, pass through review so
+            # the trail shows verification; otherwise complete directly. Either
+            # way `final` was already gated on evidence.
+            if any(t.is_review for t in evidence.tasks):
+                self._safe_set(spec.run_id, RunState.REVIEW, "verifying")
+            self._safe_set(spec.run_id, RunState.COMPLETED, reason)
+        elif final == RunState.FAILED:
+            self._safe_set(spec.run_id, RunState.FAILED, reason)
         else:
-            # blocked / needs_input / failed etc. Prefer the orchestrator's
-            # explicit reason over the generic transition word.
-            if proj.state != final:
-                self.store.set_state(run_id, final, reason=reason or final.value)
+            self._safe_set(spec.run_id, RunState.BLOCKED, reason)
+
+    def _safe_set(self, run_id: str, target: RunState, reason: str) -> None:
+        """Apply a transition only if the state machine permits it."""
+        proj = self.store.get_run(run_id)
+        if proj is None or proj.state == target:
+            return
+        if can_transition(proj.state, target):
+            self.store.set_state(run_id, target, reason=reason)
+
+    def _reconcile_projection(self, run_id: str) -> Optional[RunProjection]:
+        """Refresh a non-terminal run from live upstream Kanban truth.
+
+        Status/collect call this so the HCA projection reflects the board
+        rather than a stale enum. Terminal success/failure/cancel are never
+        reopened; a ``blocked`` run may advance if the board later satisfies
+        the evidence gate.
+        """
+        proj = self.store.get_run(run_id)
+        if proj is None or proj.state in (
+            RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED
+        ):
+            return proj
+        project = getattr(self.orchestrator, "project", None)
+        spec = self.store.get_spec(run_id)
+        if spec is None or not callable(project):
+            return proj
+        try:
+            evidence = project(spec, self.store)
+        except Exception:  # pragma: no cover - defensive; never fail status
+            return proj
+        if evidence is None:
+            return proj
+        self._reconcile_from_evidence(spec, evidence)
+        return self.store.get_run(run_id)
+
+    def _collected_artifacts(self, run_id: str) -> list[Artifact]:
+        """Artifacts observed on the run's terminal Kanban tasks.
+
+        Read from the most recent evidence event so ``collect`` links every
+        claimed output to a real Kanban task/attachment rather than prose.
+        """
+        latest: dict[str, Any] = {}
+        for e in self.store.list_events(run_id):
+            if e["kind"] == "run.evidence":
+                latest = e.get("data", {}) or {}
+        ev = latest.get("evidence", {}) if isinstance(latest, dict) else {}
+        out: list[Artifact] = []
+        for t in ev.get("tasks", []) if isinstance(ev, dict) else []:
+            for a in t.get("artifacts", []) or []:
+                out.append(
+                    Artifact(
+                        name=a.get("name", ""),
+                        kind=a.get("kind", "kanban"),
+                        ref=a.get("ref", ""),
+                        task_id=a.get("task_id", t.get("task_id", "")),
+                    )
+                )
+            # A non-empty upstream result is itself evidence of a real output.
+            if t.get("result"):
+                out.append(
+                    Artifact(
+                        name=f"result:{t.get('task_id','')}",
+                        kind="result",
+                        ref=t.get("result", "")[:200],
+                        task_id=t.get("task_id", ""),
+                    )
+                )
+        return out
 
     # --- status ---
 
@@ -257,6 +369,8 @@ class FleetService:
                 False, EXIT_INVALID, "status", run_id, "unknown",
                 f"unknown run {run_id}",
             )
+        # Reconcile the projection from live upstream Kanban truth.
+        proj = self._reconcile_projection(run_id) or proj
         return self._status_result("status", proj)
 
     # --- respond ---
@@ -284,7 +398,15 @@ class FleetService:
     # --- collect ---
 
     def collect(self, run_id: str) -> ServiceResult:
-        result = build_result(self.store, run_id, cleanup={"state_dir": self.cfg.state_dir})
+        # Reconcile from upstream so a run that finished on the board is
+        # collected as such, then aggregate the immutable manifest.
+        if self.store.get_run(run_id) is not None:
+            self._reconcile_projection(run_id)
+        artifacts = self._collected_artifacts(run_id)
+        result = build_result(
+            self.store, run_id, artifacts=artifacts,
+            cleanup={"state_dir": self.cfg.state_dir},
+        )
         if result is None:
             return ServiceResult(
                 False, EXIT_INVALID, "collect", run_id, "unknown",

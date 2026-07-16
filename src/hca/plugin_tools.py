@@ -96,27 +96,44 @@ TOOL_HANDLERS = {
 }
 
 
-def register_tools(ctx: Any) -> list[str]:
-    """Register the five team tools with a Hermes plugin context.
+def _runtime_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return the provider-safe function schema accepted by Hermes.
 
-    Supports a couple of common context shapes; a no-op (returns names) if the
-    context does not expose a tool registrar, so discovery never crashes.
+    HCA keeps version/result/approval metadata in ``plugin_schemas`` for its
+    own typed contract, but OpenAI-compatible function definitions only allow
+    name/description/parameters (plus provider-supported strict flags).  Do not
+    leak HCA metadata into the model request.
     """
-    registered: list[str] = []
+    return {
+        "name": schema["name"],
+        "description": schema["description"],
+        "parameters": schema["parameters"],
+    }
+
+
+def register_tools(ctx: Any) -> list[str]:
+    """Register the five team tools through the current Hermes context API.
+
+    ``PluginContext.register_tool`` is keyword-only in practice even though
+    Python does not enforce that: ``name, toolset, schema, handler``.  A prior
+    positional call accidentally passed the handler as ``toolset`` and then
+    swallowed the resulting ``TypeError``, so a plugin could appear loaded
+    while exposing zero tools.  Registration now fails loudly.
+    """
     schemas = {s["name"]: s for s in all_tool_schemas()}
+    registered: list[str] = []
+    registrar = getattr(ctx, "register_tool", None)
+    if not callable(registrar):
+        raise RuntimeError("Hermes PluginContext.register_tool is unavailable")
     for name, handler in TOOL_HANDLERS.items():
         schema = schemas[name]
-        if hasattr(ctx, "register_tool"):
-            try:
-                ctx.register_tool(name, handler, schema=schema)
-                registered.append(name)
-                continue
-            except Exception:
-                pass
-        if hasattr(ctx, "add_tool"):
-            try:
-                ctx.add_tool(name, handler, schema)
-                registered.append(name)
-            except Exception:
-                pass
+        registrar(
+            name=name,
+            toolset="hca",
+            schema=_runtime_schema(schema),
+            handler=handler,
+            description=schema["description"],
+            emoji="🧭",
+        )
+        registered.append(name)
     return registered

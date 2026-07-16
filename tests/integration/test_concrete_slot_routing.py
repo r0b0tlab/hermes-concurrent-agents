@@ -33,10 +33,18 @@ class FakeTmux:
         self.calls: list[dict] = []
         self._pid = 5000
 
-    def run_in_slot(self, name, command, *, env=None, workdir=None, log_path=None):
+    def run_in_slot(
+        self, name, command, *, env=None, unset_env=None, workdir=None, log_path=None
+    ):
         self._pid += 1
         self.calls.append(
-            {"slot": name, "env": dict(env or {}), "command": command, "pid": self._pid}
+            {
+                "slot": name,
+                "env": dict(env or {}),
+                "unset_env": list(unset_env or []),
+                "command": command,
+                "pid": self._pid,
+            }
         )
         return self._pid
 
@@ -122,6 +130,7 @@ def test_two_tasks_route_to_distinct_concrete_slots(hermes_env, tmp_path):
     for c in tmux.calls:
         assert c["env"]["HERMES_KANBAN_RUN_ID"].isdigit()
         assert c["env"]["HERMES_KANBAN_BOARD"] == board
+        assert c["unset_env"] == ["HERMES_TUI"]
         assert "--cli" in c["command"]
 
 

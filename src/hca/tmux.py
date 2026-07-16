@@ -127,6 +127,7 @@ class TmuxManager:
         command: str,
         *,
         env: Optional[dict[str, str]] = None,
+        unset_env: Optional[list[str]] = None,
         workdir: Optional[str] = None,
         log_path: Optional[str] = None,
     ) -> int:
@@ -143,11 +144,18 @@ class TmuxManager:
         exports = " ".join(
             f"{shlex.quote(k)}={shlex.quote(v)}" for k, v in sorted(env.items())
         )
+        unset_names = []
+        for key in unset_env or []:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                raise TmuxError(f"invalid environment variable name: {key!r}")
+            unset_names.append(key)
+        unset = f"unset {' '.join(unset_names)}; " if unset_names else ""
+        export = f"export {exports}; " if exports else ""
         cd = f"cd {shlex.quote(workdir)} && " if workdir else ""
         # close any pipe left over from the previous run of this pane
         self._cmd("pipe-pane", "-t", name, check=False)
         # respawn-pane -k kills current pane process and runs new command
-        shell = f"{cd}export {exports}; exec {command}" if exports else f"{cd}exec {command}"
+        shell = f"{cd}{unset}{export}exec {command}"
         self._cmd("respawn-pane", "-k", "-t", name, "bash", "-lc", shell)
         if log_path:
             self._cmd(

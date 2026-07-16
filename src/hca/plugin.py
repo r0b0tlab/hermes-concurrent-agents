@@ -1,4 +1,12 @@
-"""Hermes plugin: subagent budget gate + activity telemetry (no-op without HCA_STATE_DB)."""
+"""Hermes plugin: subagent budget gate + activity telemetry (no-op without HCA_STATE_DB).
+
+Subagents are disabled by default (``HCA_MAX_SUBAGENT_CREDITS=0``); durable
+parallel work belongs in Kanban. When explicitly opted in, leases correlate by
+``child_session_id`` — the only id present in *both* ``subagent_start`` and
+``subagent_stop`` (stop does not carry ``child_subagent_id``). There is no
+fixed 600s child expiry: a long-running child stays counted until its stop or
+session cleanup, with conservative orphan reconciliation on session end.
+"""
 
 from __future__ import annotations
 
@@ -22,9 +30,9 @@ def _state_db():
 
 def _max_children() -> float:
     try:
-        return float(os.environ.get("HCA_MAX_SUBAGENT_CREDITS", "2"))
+        return float(os.environ.get("HCA_MAX_SUBAGENT_CREDITS", "0"))
     except ValueError:
-        return 2.0
+        return 0.0
 
 
 def register(ctx: Any = None) -> None:
@@ -40,13 +48,18 @@ def register(ctx: Any = None) -> None:
         ctx.register_hook("subagent_stop", on_subagent_stop)
         ctx.register_hook("on_session_end", on_session_end)
     # Register the five scoped team tools (no unrestricted passthrough).
+    # Registration failures are fatal: a loaded plugin that silently exposes
+    # zero tools is more dangerous than an explicit startup/doctor failure.
     if ctx is not None:
-        try:
-            from hca.plugin_tools import register_tools
+        from hca.plugin_tools import register_tools
 
-            register_tools(ctx)
-        except Exception:
-            pass
+        register_tools(ctx)
+
+
+def _parent_owner() -> str:
+    return os.environ.get("HERMES_KANBAN_TASK", "") or os.environ.get(
+        "HERMES_KANBAN_RUN_ID", "session"
+    )
 
 
 def on_pre_tool_call(tool_name: str, args: dict, **kwargs) -> Optional[dict]:
@@ -55,64 +68,99 @@ def on_pre_tool_call(tool_name: str, args: dict, **kwargs) -> Optional[dict]:
     db = _state_db()
     if db is None:
         return None
+    limit = _max_children()
     tasks = args.get("tasks")
     n = len(tasks) if isinstance(tasks, list) and tasks else 1
     credits = float(n)
     used = db.active_lease_credits(kind="subagent")
-    limit = _max_children()
     if used + credits > limit:
+        # Default limit is 0 → delegation is blocked; durable fan-out uses Kanban.
         msg = (
             f"HCA subagent budget exceeded ({used + credits:.0f}/{limit:.0f}). "
-            "Create durable Kanban child tasks or continue sequentially."
+            "Create durable Kanban child tasks (visible + recoverable) instead "
+            "of subagents, or continue sequentially."
         )
         db.set_activity(kind="admission.wait", message=msg)
         return {"block": True, "message": msg}
-    # reserve provisional leases
-    for i in range(n):
+    # Reserve provisional leases WITHOUT a fixed expiry (a long child must stay
+    # counted). Each reservation is tagged with the parent so session-end can
+    # reconcile orphans that never produced a subagent_start.
+    owner = _parent_owner()
+    for _ in range(n):
         db.acquire_lease(
             lease_id=f"subagent-reserve-{uuid.uuid4().hex[:12]}",
             kind="subagent",
-            owner=os.environ.get("HERMES_KANBAN_TASK", "session"),
+            owner=owner,
             credits=1.0,
-            ttl_seconds=600,
-            meta={"phase": "reserve"},
+            ttl_seconds=None,
+            meta={"phase": "reserve", "parent": owner},
         )
     return None
 
 
-def on_subagent_start(subagent_id: str = "", **kwargs) -> None:
+def on_subagent_start(
+    child_subagent_id: str = "",
+    child_session_id: str = "",
+    parent_session_id: str = "",
+    parent_turn_id: str = "",
+    **kwargs,
+) -> None:
     db = _state_db()
     if db is None:
         return
+    owner = _parent_owner()
+    # Convert one provisional reservation into an exact child lease keyed by
+    # child_session_id (the durable correlation key present in stop too).
+    try:
+        with db.connection() as conn:
+            conn.execute(
+                "DELETE FROM leases WHERE lease_id IN ("
+                "  SELECT lease_id FROM leases WHERE kind='subagent' "
+                "  AND meta_json LIKE '%\"phase\": \"reserve\"%' AND owner=? "
+                "  ORDER BY created_at ASC LIMIT 1)",
+                (owner,),
+            )
+    except Exception:
+        pass
+    if child_session_id:
+        db.acquire_lease(
+            lease_id=f"subagent-{child_session_id}",
+            kind="subagent",
+            owner=owner,
+            credits=1.0,
+            ttl_seconds=None,  # no fixed expiry — long children stay counted
+            meta={
+                "phase": "active",
+                "child_subagent_id": child_subagent_id,
+                "child_session_id": child_session_id,
+                "parent_session_id": parent_session_id,
+                "parent_turn_id": parent_turn_id,
+                "parent": owner,
+            },
+        )
     db.set_activity(
         kind="subagent.start",
-        message=f"subagent {subagent_id} start",
+        message=f"subagent {child_subagent_id or child_session_id} start",
         task_id=os.environ.get("HERMES_KANBAN_TASK", ""),
         run_id=os.environ.get("HERMES_KANBAN_RUN_ID", ""),
-        data={"subagent_id": subagent_id},
+        data={"child_subagent_id": child_subagent_id, "child_session_id": child_session_id},
     )
 
 
-def on_subagent_stop(subagent_id: str = "", **kwargs) -> None:
+def on_subagent_stop(child_session_id: str = "", **kwargs) -> None:
     db = _state_db()
     if db is None:
         return
-    # release one subagent credit (best-effort: drop oldest reserve/active)
-    try:
-        with db.connection() as conn:
-            row = conn.execute(
-                "SELECT lease_id FROM leases WHERE kind='subagent' ORDER BY created_at ASC LIMIT 1"
-            ).fetchone()
-            if row:
-                conn.execute("DELETE FROM leases WHERE lease_id=?", (row["lease_id"],))
-    except Exception:
-        pass
+    # Release the EXACT child lease by child_session_id (out-of-order safe).
+    # subagent_stop carries no child_subagent_id, so session id is the key.
+    if child_session_id:
+        db.release_lease(f"subagent-{child_session_id}")
     db.set_activity(
         kind="subagent.stop",
-        message=f"subagent {subagent_id} stop",
+        message=f"subagent {child_session_id} stop",
         task_id=os.environ.get("HERMES_KANBAN_TASK", ""),
         run_id=os.environ.get("HERMES_KANBAN_RUN_ID", ""),
-        data={"subagent_id": subagent_id},
+        data={"child_session_id": child_session_id},
     )
 
 
@@ -120,12 +168,13 @@ def on_session_end(**kwargs) -> None:
     db = _state_db()
     if db is None:
         return
-    owner = os.environ.get("HERMES_KANBAN_TASK", "")
+    owner = _parent_owner()
+    # Conservative orphan reconciliation: release this parent's leases (its
+    # children cannot outlive it) plus any genuinely expired leases.
     try:
         with db.connection() as conn:
             if owner:
                 conn.execute("DELETE FROM leases WHERE owner=?", (owner,))
-            # also expire any timed-out leases
             conn.execute(
                 "DELETE FROM leases WHERE expires_at IS NOT NULL AND expires_at < ?",
                 (time.time(),),

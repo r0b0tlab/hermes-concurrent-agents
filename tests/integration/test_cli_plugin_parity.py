@@ -13,8 +13,26 @@ from hca.plugin_tools import (
     hca_team_status,
     hca_team_stop,
 )
+from hca.evidence import ExecutionEvidence, TaskEvidence
 from hca.run import RunState
 from hca.service import FleetService
+
+
+def _done_evidence() -> ExecutionEvidence:
+    return ExecutionEvidence(
+        root_task_id="t1",
+        tasks=[
+            TaskEvidence(
+                task_id="t1",
+                assignee="hca-f-coder-01",
+                terminal_status="done",
+                run_id=1,
+                pid=999,
+                result="done",
+                is_root=True,
+            )
+        ],
+    )
 
 
 class Completing:
@@ -22,7 +40,7 @@ class Completing:
         return RunState.PLANNING
 
     def execute(self, spec, store):
-        return RunState.COMPLETED
+        return _done_evidence()
 
 
 class NeedsInput:
@@ -31,7 +49,7 @@ class NeedsInput:
         return RunState.NEEDS_INPUT
 
     def execute(self, spec, store):  # pragma: no cover
-        return RunState.COMPLETED
+        return _done_evidence()
 
 
 def _svc(tmp_path, orch):

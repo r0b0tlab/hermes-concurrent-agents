@@ -149,7 +149,7 @@ def fleet_from_dict(data: dict[str, Any]) -> FleetConfig:
             worktree_retain_until=str(retention.get("worktree_retain_until", "terminal+clean")),
         ),
         profile_slots=dict(profiles.get("slots") or FleetConfig().profile_slots),
-        delegation_max_children=int(delegation.get("max_concurrent_children", 2)),
+        delegation_max_children=int(delegation.get("max_concurrent_children", 0)),
         approvals_yolo=bool(approvals.get("yolo", False)),
         preset=str(data.get("preset", "") or fleet.get("preset", "") or ""),
     )

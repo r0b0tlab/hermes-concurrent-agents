@@ -1,4 +1,6 @@
 import shutil
+import time
+import uuid
 
 import pytest
 
@@ -26,3 +28,27 @@ def test_slot_lifecycle():
     assert isinstance(text, str)
     tm.kill_session(name)
     assert not tm.has_session(name)
+
+
+@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux missing")
+def test_run_in_slot_can_remove_inherited_tui_mode(monkeypatch):
+    monkeypatch.setenv("HERMES_TUI", "1")
+    socket = f"hca-test-env-{uuid.uuid4().hex[:8]}"
+    tm = TmuxManager(socket=socket)
+    name = "hca-test-env-slot"
+    try:
+        tm.create_slot(name)
+        tm.run_in_slot(
+            name,
+            "printf 'HERMES_TUI=%s\\n' \"${HERMES_TUI-unset}\"; sleep 30",
+            unset_env=["HERMES_TUI"],
+        )
+        text = ""
+        for _ in range(20):
+            text = tm.capture_pane(name, lines=5)
+            if "HERMES_TUI=" in text:
+                break
+            time.sleep(0.05)
+        assert "HERMES_TUI=unset" in text
+    finally:
+        tm.kill_session(name)
