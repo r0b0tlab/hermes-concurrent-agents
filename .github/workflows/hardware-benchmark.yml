@@ -33,9 +33,10 @@ jobs:
     env:
       HCA_FLEET_CONFIG: ${{ inputs.fleet_config }}
       HCA_SOURCE_PROFILE: ${{ inputs.source_profile }}
-      HCA_VENV: ${{ runner.temp }}/hca-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
+      - name: Select isolated tooling environment
+        run: echo "HCA_VENV=${RUNNER_TEMP}/hca-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
       - name: Install HCA in an isolated environment
         run: |
           python3 -m venv "$HCA_VENV"

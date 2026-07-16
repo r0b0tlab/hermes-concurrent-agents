@@ -47,6 +47,7 @@ def test_ci_has_static_advisory_package_generic_and_portable_lanes():
     assert "scripts/release-check.sh --quick" in text
     release = (ROOT / "scripts" / "release-check.sh").read_text()
     assert "pyright" in release
+    assert "actionlint" in release
     assert "HCA_HERMES_SRC" in release
     assert "|| true" not in text
 
@@ -55,7 +56,8 @@ def test_hardware_workflow_is_manual_and_never_publishes():
     assert "workflow_dispatch:" in text
     assert "self-hosted" in text and "gb10" in text.lower()
     assert "contents: read" in text
-    assert "runner.temp" in text
+    assert "${{ runner.temp }}" not in text
+    assert "RUNNER_TEMP" in text
     assert ".hardware-venv" not in text
     assert "upload-artifact" not in text
     forbidden = ("twine upload", "gh release create", "git push", "docker push")

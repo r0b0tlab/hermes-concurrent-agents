@@ -29,6 +29,12 @@ fi
 echo "[release] static analysis"
 "$python_bin" -m ruff check src tests scripts
 "$python_bin" -m pyright
+actionlint_bin="$("$python_bin" -c 'import sys; from pathlib import Path; print(Path(sys.executable).parent / "actionlint")')"
+if [[ ! -x "$actionlint_bin" ]]; then
+  echo "actionlint is missing; install the project development extra" >&2
+  exit 2
+fi
+"$actionlint_bin" .github/workflows/*.yml
 
 echo "[release] unit tests"
 "$python_bin" -m pytest -q tests/unit

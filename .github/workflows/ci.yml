@@ -38,7 +38,7 @@ jobs:
         run: scripts/release-check.sh --quick
 
   stable-hermes-contract:
-    name: Required Hermes ${{ env.HERMES_STABLE_TAG }} contract
+    name: Required Hermes v2026.7.7.2 contract
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

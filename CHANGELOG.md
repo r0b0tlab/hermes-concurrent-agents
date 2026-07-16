@@ -38,6 +38,7 @@
 - Required CI lanes for Python 3.11/3.12/3.13 unit/static checks, pinned stable
   Hermes contracts, clean wheel/plugin discovery, generic integration, macOS
   portability smoke, and a clearly advisory latest-Hermes-main drift probe.
+  Workflow semantics are validated with `actionlint`, not only a YAML parser.
 
 ### Fixed
 - Dispatch is reservation-first: the spawn callback makes no admission
