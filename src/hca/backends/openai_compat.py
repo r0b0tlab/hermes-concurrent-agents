@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -63,7 +64,36 @@ def fetch_text(url: str, timeout: float = 5.0) -> str:
 
 def is_local_endpoint(endpoint: str) -> bool:
     host = urlparse(endpoint).hostname or ""
-    return host in {"127.0.0.1", "localhost", "0.0.0.0", "::1"} or host.startswith("10.") or host.startswith("192.168.") or host.startswith("172.")
+    if host == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback or address.is_unspecified
+
+
+def endpoint_scope(endpoint: str) -> str:
+    if not endpoint:
+        return "unset"
+    return "local" if is_local_endpoint(endpoint) else "remote"
+
+
+def safe_error_detail(error: object, endpoint: str, *, limit: int = 300) -> str:
+    """Return useful error text with all connection identifiers removed."""
+    detail = f"{type(error).__name__}: {error}"
+    parsed = urlparse(endpoint)
+    tokens = {
+        endpoint,
+        endpoint.rstrip("/"),
+        parsed.netloc,
+        parsed.hostname or "",
+        parsed.username or "",
+        parsed.password or "",
+    }
+    for token in sorted((item for item in tokens if item), key=len, reverse=True):
+        detail = detail.replace(token, "<endpoint>")
+    return detail[:limit]
 
 
 def probe_models(endpoint: str, expected_model: str = "", timeout: float = 10.0) -> ProbeResult:
@@ -76,7 +106,7 @@ def probe_models(endpoint: str, expected_model: str = "", timeout: float = 10.0)
             return ProbeResult(False, f"model {expected_model!r} not in /models ids={ids}", data)
         return ProbeResult(True, f"/models ok ids={ids[:8]}", data)
     except Exception as exc:
-        return ProbeResult(False, f"models probe failed: {exc}")
+        return ProbeResult(False, f"models probe failed: {safe_error_detail(exc, endpoint)}")
 
 
 def probe_chat(endpoint: str, model: str, timeout: float = 30.0) -> ProbeResult:
@@ -110,7 +140,7 @@ def probe_chat(endpoint: str, model: str, timeout: float = 30.0) -> ProbeResult:
             return ProbeResult(False, "chat response has no text or reasoning content", data)
         return ProbeResult(True, f"chat ok ({text_field}): {content[:80]!r}", data)
     except Exception as exc:
-        return ProbeResult(False, f"chat probe failed: {exc}")
+        return ProbeResult(False, f"chat probe failed: {safe_error_detail(exc, endpoint)}")
 
 
 def probe_tools(endpoint: str, model: str, timeout: float = 45.0) -> ProbeResult:
@@ -149,4 +179,4 @@ def probe_tools(endpoint: str, model: str, timeout: float = 45.0) -> ProbeResult
         # Not all models honor tools; treat missing as soft fail
         return ProbeResult(False, "tools: no tool_calls in response (soft fail)", data)
     except Exception as exc:
-        return ProbeResult(False, f"tools probe failed: {exc}")
+        return ProbeResult(False, f"tools probe failed: {safe_error_detail(exc, endpoint)}")

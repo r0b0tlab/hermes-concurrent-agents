@@ -1,42 +1,63 @@
-# GB10 / DGX Spark cluster
+# Remote placement and GB10 clusters
 
-## Prerequisites (NVIDIA — not HCA)
+## Status
 
-Complete the matching playbook first:
+**Remote agent placement is unsupported in the stable HCA surface.** HCA may
+control multiple workers on one host, and those workers may use a model endpoint
+hosted elsewhere through their existing Hermes profiles. HCA does not place or
+supervise workers on remote hosts.
 
-- 2 nodes: [connect-two-sparks](https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/connect-two-sparks) + `discover-sparks`
-- 3 nodes: [connect-three-sparks](https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/connect-three-sparks)
-- N nodes: [multi-sparks-through-switch](https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/multi-sparks-through-switch)
+The distinction is load-bearing:
 
-Requirements:
+- **Remote inference:** supported. The Hermes profile owns provider selection,
+  endpoint configuration, authentication, and fallback.
+- **Remote agent placement:** unsupported. The authoritative Hermes Kanban
+  SQLite board, claims, heartbeats, comments, task completion, and HCA process
+  ownership cannot safely cross hosts with the available local transport.
 
-- Same username on all Sparks
-- QSFP / CX7 fabric up (`ibdev2netdev`)
-- Passwordless SSH both ways
+## Fail-closed behavior
 
-See also [nvidia-playbooks.md](nvidia-playbooks.md).
+The old `hca cluster nodes up` compatibility command exits with preflight code
+`3` before opening SSH. Likewise, starting or initializing a fleet with legacy
+`control` or `node` roles fails before profiles, state, or supervisors are
+created. The shared `FleetService` applies the same rule to Hermes plugin calls.
 
-## HCA setup
+Two read-only/local helpers remain explicitly experimental:
 
-```bash
-hca init --preset gb10-cluster-vllm --model <served>
-# or gb10-cluster-sglang
+- `hca cluster nodes add HOST...` records local inventory only.
+- `hca cluster doctor` reports SSH reachability and local capability checks; it
+  does **not** prove task placement, lifecycle ownership, or recovery.
 
-hca cluster nodes add spark-a spark-b   # prefer QSFP IPs
-hca cluster doctor
-hca up --role control
-hca cluster nodes up
-hca watch
+## Why HCA does not invent a transport
+
+Hermes Kanban is the source of task truth. A correct remote worker transport
+must preserve atomic claim ownership, exact run identity, heartbeat/comment/
+completion semantics, stale-worker recovery, and board authorization. HCA will
+not work around that boundary with:
+
+- NFS-mounted SQLite;
+- ad hoc SQLite replication;
+- an HCA-owned distributed task database;
+- remote shell success treated as application success; or
+- modifications to NousResearch repositories.
+
+A future placement design can be considered only when HCA can consume an
+existing supported Hermes remote Kanban transport and pass capacity-aware
+placement, node-loss recovery, duplicate-worker, and cleanup acceptance.
+
+## Supported multi-node topology
+
+It is safe to run the model server on another admitted node and keep the agents,
+Kanban board, HCA controller, state, and workspaces together on the control host:
+
+```text
+single HCA/Kanban/worker host ── ordinary Hermes profile ── remote model endpoint
 ```
 
-## Modes
+Use the selected Hermes profile to configure that endpoint. Do not copy its
+credential or connection string into HCA fleet files, state, logs, or result
+artifacts.
 
-1. **Agent fleet (default)** — each node runs its own engine + Hermes workers; SSH is control only.
-2. **Sharded serve (optional)** — multi-node vLLM/NCCL for one large model; point HCA at that endpoint; do not treat as default fleet topology.
-
-## Rules
-
-- No NFS SQLite for Kanban
-- No join tokens as primary auth
-- Inference HTTP stays node-local; SSH is orchestration
-- Node loss → mark unhealthy → reclaim/requeue
+NVIDIA's connect-two/connect-three/switch playbooks remain useful for hardware
+and inference networking, but completing those playbooks does not enable HCA
+remote agent placement.

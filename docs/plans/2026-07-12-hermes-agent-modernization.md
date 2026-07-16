@@ -1,6 +1,14 @@
 # Hermes Concurrent Agents Modernization Implementation Plan
 
-> **For Hermes:** Use the `subagent-driven-development` skill to implement this plan task-by-task. Preserve the tmux/process/profile/workspace isolation contract throughout.
+> **Historical and superseded. Do not execute.** This design record includes
+> remote-placement and model-launch proposals that were intentionally rejected
+> or narrowed during implementation. Current truth is in
+> [Current state](../current-state-report.md),
+> [Support matrix](../support-matrix.md), [Cluster scope](../gb10-cluster.md),
+> and [Migration](../migration.md).
+
+> **Historical instruction:** The original plan called for subagent-driven
+> implementation while preserving tmux/process/profile/workspace isolation.
 
 **Goal:** Modernize `hermes-concurrent-agents` into a resilient, human-friendly control plane optimized **first for NVIDIA GB10 (single box) and GB10 clusters**, secondarily usable on other large-memory devices. A human submits a large task; HCA runs many isolated local Hermes sessions against high-throughput local inference under adaptive unified-memory backpressure; the operator can watch every live session; crashes reclaim cleanly; throughput is measured on real GB10 hardware — without KV/session collisions, dual dispatchers, or opaque tmux guesswork.
 
@@ -103,7 +111,7 @@ HCA inherits operational truth from NVIDIA DGX Spark playbooks rather than inven
 
 ### 1.3 Existing plan handling
 
-`/Users/am/hermes-concurrent-agents/INTEGRATION_PLAN.md` is untracked and materially stale. Do not silently overwrite or commit it. After this plan is implemented, either delete it with explicit approval or replace it with a short pointer to this document.
+`<local-checkout>/INTEGRATION_PLAN.md` was untracked and materially stale. Do not silently overwrite or commit it. After this plan is implemented, either delete it with explicit approval or replace it with a short pointer to the authoritative plan.
 
 ---
 

@@ -1,0 +1,39 @@
+# Notices and attribution
+
+`hermes-concurrent-agents` is an independent r0b0tlab project.
+
+## Hermes Agent
+
+HCA is designed around Hermes Agent's public project and selected runtime
+contracts:
+
+- Project: <https://github.com/NousResearch/hermes-agent>
+- Copyright: Nous Research and Hermes Agent contributors
+- License: MIT (see the upstream repository)
+
+Hermes Agent is not vendored by this repository. Users install and configure it
+separately. Nous Research does not maintain or endorse HCA.
+
+## NVIDIA DGX Spark documentation
+
+GB10 operational guidance references NVIDIA's public DGX Spark playbooks:
+
+- Project: <https://github.com/NVIDIA/dgx-spark-playbooks>
+- Copyright and licenses: see the upstream repository
+
+HCA does not redistribute NVIDIA model weights, containers, drivers, or
+playbook source. NVIDIA does not maintain or endorse HCA.
+
+## Third-party services and models
+
+Names such as vLLM, SGLang, OpenAI-compatible, and model identifiers describe
+external infrastructure selected by the operator through Hermes. They are not
+bundled services, endorsements, or HCA-owned provider integrations.
+
+## Project provenance
+
+The harmless static source identifier `r0b0tlab/hermes-concurrent-agents`
+records project provenance only. It performs no tracking, telemetry, network
+request, or user identification.
+
+The HCA source itself is licensed under the repository [MIT License](LICENSE).

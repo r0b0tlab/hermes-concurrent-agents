@@ -81,6 +81,23 @@ def test_bench_dry_run():
     )
     assert r.dry_run
     assert len(r.levels) == 2
+    assert r.endpoint_scope == "local"
+    assert "endpoint" not in r.to_dict()
+
+
+def test_bench_report_never_serializes_connection_string():
+    endpoint = "https://alice:sensitive@inference.example.invalid/v1"
+    report = run_bench(
+        engine="openai_compat",
+        endpoint=endpoint,
+        model="m",
+        levels=[1],
+        dry_run=True,
+    )
+    rendered = str(report.to_dict())
+    assert report.endpoint_scope == "remote"
+    for forbidden in (endpoint, "alice", "sensitive", "inference.example.invalid"):
+        assert forbidden not in rendered
 
 
 def test_parser_has_complete_commands():

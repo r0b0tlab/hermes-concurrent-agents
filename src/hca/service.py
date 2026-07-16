@@ -164,6 +164,22 @@ class FleetService:
         resume: str = "",
         detach: bool = False,
     ) -> ServiceResult:
+        # Legacy control/node roles implied remote agent placement. Keep status
+        # and collection usable for old state, but reject every new run before
+        # graph creation: no supported remote Kanban claim/heartbeat transport
+        # exists. Remote *model endpoints* remain ordinary Hermes configuration.
+        if not resume and self.cfg.role.value != "single":
+            return ServiceResult(
+                False,
+                EXIT_PREFLIGHT,
+                "run",
+                "",
+                "unsupported",
+                "remote agent placement is unsupported for this HCA release",
+                "run HCA workers on the Kanban board host; a remote model endpoint "
+                "remains supported through the selected Hermes profile",
+            )
+
         # Resume an existing run by id.
         if resume:
             proj = self.store.get_run(resume)
@@ -335,6 +351,16 @@ class FleetService:
             )
 
         proj = self.store.get_run(spec.run_id)
+        if proj is None:  # pragma: no cover - state-store invariant guard
+            return ServiceResult(
+                False,
+                EXIT_RUNTIME,
+                "run",
+                spec.run_id,
+                "unknown",
+                "run projection disappeared after execution",
+                "inspect HCA state integrity before retrying",
+            )
         return self._status_result("run", proj)
 
     def _reconcile_from_evidence(
@@ -642,6 +668,16 @@ class FleetService:
             return reconciled
         self._ensure_controller(run_id, fail_closed=True)
         proj = self.store.get_run(run_id)
+        if proj is None:  # pragma: no cover - state-store invariant guard
+            return ServiceResult(
+                False,
+                EXIT_RUNTIME,
+                "respond",
+                run_id,
+                "unknown",
+                "run projection disappeared after recording input",
+                "inspect HCA state integrity before replaying the answer",
+            )
         return self._status_result("respond", proj, message=f"recorded answer to {question_id}")
 
     # --- collect ---
@@ -653,8 +689,10 @@ class FleetService:
             self._reconcile_projection(run_id)
         artifacts = self._collected_artifacts(run_id)
         result = build_result(
-            self.store, run_id, artifacts=artifacts,
-            cleanup={"state_dir": self.cfg.state_dir},
+            self.store,
+            run_id,
+            artifacts=artifacts,
+            cleanup={"hca_state_preserved": True},
         )
         if result is None:
             return ServiceResult(
@@ -737,6 +775,16 @@ class FleetService:
                 False, EXIT_RUNTIME, "stop", run_id, proj.state.value, str(exc),
             )
         proj = self.store.get_run(run_id)
+        if proj is None:  # pragma: no cover - state-store invariant guard
+            return ServiceResult(
+                False,
+                EXIT_RUNTIME,
+                "stop",
+                run_id,
+                "unknown",
+                "run projection disappeared after cancellation",
+                "inspect HCA state integrity before retrying stop",
+            )
         return self._status_result(
             "stop", proj, message="run cancelled; partial work preserved"
         )

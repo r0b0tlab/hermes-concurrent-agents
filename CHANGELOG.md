@@ -29,6 +29,15 @@
 - Concrete-slot routing (`hca.routing`): logical roles resolve to an eligible
   *free* concrete profile slot with pre-reservation; unknown role/requirement
   hints are unroutable (fail visibly) instead of silently mapped to `coder`.
+- Deterministic orchestration acceptance runner plus generic real-HTTP fake
+  endpoint coverage, explicit useful-overlap/fan-in evidence, and conservative
+  telemetry-disabled admission coverage.
+- Generated support matrix, migration/uninstall guide, security model, private
+  vulnerability-reporting policy, project/upstream attribution notice, and
+  machine-enforced public-source safety scan.
+- Required CI lanes for Python 3.11/3.12/3.13 unit/static checks, pinned stable
+  Hermes contracts, clean wheel/plugin discovery, generic integration, macOS
+  portability smoke, and a clearly advisory latest-Hermes-main drift probe.
 
 ### Fixed
 - Dispatch is reservation-first: the spawn callback makes no admission
@@ -41,8 +50,12 @@
 - `hca task add --repo` binds a git worktree to the real task via Hermes'
   canonical `--workspace worktree:<path>` contract instead of a detached
   `pending-<timestamp>` worktree the task never references.
-- `hca init` now persists the resolved fleet config; bare `hca up` / `doctor` / `watch`
-  reload it instead of silently falling back to defaults (wrong socket/model)
+- `hca init` now persists an owner-only scheduling snapshot; package-preset
+  endpoints are reconstructed while custom endpoint/metrics/cluster connection
+  data is never retained. Legacy unsafe snapshots are sanitized on first read.
+- Plan, init, benchmark, and doctor reports expose endpoint scope rather than
+  connection strings; collected manifests omit absolute state paths. `hca init
+  --dry-run` no longer creates the state directory.
 - Kanban spawn never respawns a busy slot (would kill the running worker and
   violate the live-slot unique index); saturated roles stay queued
 - `hca logs` works: worker output is captured via `tmux pipe-pane` into
@@ -53,16 +66,41 @@
 - vLLM metrics: 0.0 readings no longer treated as missing; prefix-cache hit rate
   computed from hits/queries counters
 - SGLang metrics: Prometheus `/metrics` actually parsed (`token_usage`,
-  `num_running_reqs`, `num_queue_reqs`); launch pack passes `--enable-metrics`
+  `num_running_reqs`, `num_queue_reqs`)
+- Completion projection waits for exact live worker cleanup; successful
+  upstream run summaries count as result evidence while blocked summaries stay
+  blockers. Worker logs are board/task/run namespaced so board-local integer run
+  IDs cannot collide.
+- Worker-created tasks outside the persisted HCA graph are excluded from
+  dispatch, blocked, and evidenced through `run.graph_expansion_denied` without
+  receiving a lease or process.
+- Generic work now routes to a bounded first-class `general` role rather than a
+  coder persona. Generated workers disable optional plugins and broad skill
+  context so role toolsets remain least privilege.
 
 ### Changed
-- Engine launch packs aligned with current NVIDIA DGX Spark playbooks:
-  SGLang `lmsysorg/sglang:latest-cu130` + `--attention-backend flashinfer`
-  (stale "experimental on GB10" warning dropped); both engines set the
-  Hermes tool-call parser flags and >=64k context by default
+- Backend docs now point to operator/NVIDIA-owned serving and require
+  model/runtime-specific tool-parser and measured context configuration.
 - Presets and SOUL templates moved into the package (`src/hca/presets`,
   `src/hca/templates`) so non-editable installs work
-- CI runs `ruff check`
+- Runtime metadata declares the actual `pyyaml>=6.0,<7` dependency, modern SPDX
+  license metadata, and packages both `LICENSE` and `NOTICE`. Source
+  distributions include migration, security, support, and operational docs.
+- The local release gate honors an exact `HCA_HERMES_SRC` checkout so pinned
+  compatibility verification does not depend on import order or mutable main.
+- Stable product documentation now centers `hca run` and distinguishes remote
+  inference (Hermes-configured and supported) from remote agent placement
+  (unsupported).
+- Contract tests against Hermes `0.18.2 / 2026.7.7.2` are mandatory and cannot
+  be masked; latest-main compatibility remains a visible advisory job.
+
+### Removed
+- HCA-owned vLLM/SGLang Compose/launch assets. HCA consumes existing endpoints;
+  it does not install, stop, replace, or own a model server.
+- Stable remote-agent startup and the `gb10-cluster-*` presets. Legacy
+  control/node mutations and `cluster nodes up` return preflight code `3`
+  before SSH, state, profile, graph, or supervisor side effects. Read-only
+  inventory/SSH doctor helpers remain explicitly experimental.
 
 ## 2.0.0 - 2026-07-12
 

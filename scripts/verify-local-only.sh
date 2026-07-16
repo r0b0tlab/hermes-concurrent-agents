@@ -20,7 +20,7 @@ Options:
   --endpoint URL   Required local base URL
   --provider NAME  Required provider key/name
   --model NAME     Required served model name
-  --smoke          Run `hermes -p PROFILE -z ... --yolo` for each profile
+  --smoke          Run a non-tool `hermes -p PROFILE -z ...` canary
   --dry-run        Print checks without reading profile files
   -h, --help       Show help
 USAGE
@@ -71,7 +71,7 @@ for profile in "${PROFILE_ARRAY[@]}"; do
     fail=1
   fi
   if [[ "$SMOKE" == true ]]; then
-    hermes -p "$profile" -z 'Say LOCAL_PROFILE_READY and nothing else.' --yolo >/tmp/hca-profile-smoke.$$ 2>&1 || {
+    hermes -p "$profile" -z 'Say LOCAL_PROFILE_READY and nothing else.' >/tmp/hca-profile-smoke.$$ 2>&1 || {
       echo "[fail] smoke failed for $profile" >&2
       cat /tmp/hca-profile-smoke.$$ >&2 || true
       fail=1

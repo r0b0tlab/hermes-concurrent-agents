@@ -1,0 +1,7 @@
+include CHANGELOG.md
+include LICENSE
+include NOTICE
+include README.md
+include SECURITY.md
+include SKILL.md
+recursive-include docs *.md

@@ -231,6 +231,60 @@ def config_shape(cfg: FleetConfig) -> dict[str, Any]:
     }
 
 
+def persisted_config_shape(cfg: FleetConfig) -> dict[str, Any]:
+    """Scheduling-only restart snapshot; never persist connection strings.
+
+    Package preset endpoints are reconstructed from the installed preset. A
+    custom endpoint is represented only by a runtime requirement and must be
+    supplied to the next process through a config, flag, or environment.
+    """
+    shaped = config_shape(cfg)
+    preset_backend: dict[str, Any] = {}
+    if cfg.preset:
+        try:
+            preset_backend = dict(
+                load_toml(resolve_preset_path(cfg.preset)).get("backend", {})
+            )
+        except (FileNotFoundError, OSError):
+            preset_backend = {}
+    default_backend = config_shape(fleet_from_dict({}))["backend"]
+    expected = {**default_backend, **preset_backend}
+    shaped["runtime"] = {
+        "endpoint_required": cfg.backend.endpoint
+        != str(expected.get("endpoint", "")),
+        "metrics_url_required": cfg.backend.metrics_url
+        != str(expected.get("metrics_url", "") or ""),
+        "auxiliary_endpoint_required": cfg.backend.auxiliary_endpoint
+        != str(expected.get("auxiliary_endpoint", "") or ""),
+    }
+    for key in ("endpoint", "metrics_url", "auxiliary_endpoint"):
+        shaped["backend"].pop(key, None)
+    shaped.pop("cluster", None)
+    shaped["approvals"] = {"yolo": False}
+    return shaped
+
+
+def write_resolved_snapshot(cfg: FleetConfig) -> Path:
+    """Atomically persist an owner-only, connection-free restart snapshot."""
+    path = resolved_snapshot_path(cfg.state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    payload = json.dumps(persisted_config_shape(cfg), indent=2).encode("utf-8")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        path.chmod(0o600)
+    finally:
+        if temp.exists():
+            temp.unlink()
+    return path
+
+
 def resolved_snapshot_path(state_dir: str = "") -> Path:
     return Path(os.path.expanduser(state_dir or "~/.hca")) / "fleet.resolved.json"
 
@@ -247,6 +301,8 @@ def load_fleet_config(
     state_dir: str = "",
 ) -> FleetConfig:
     data: dict[str, Any] = {}
+    snapshot_data: dict[str, Any] = {}
+    snapshot_path: Optional[Path] = None
     if preset:
         data = load_toml(resolve_preset_path(preset))
         data["preset"] = preset
@@ -255,11 +311,32 @@ def load_fleet_config(
         override = load_toml(path)
         data = _deep_merge(data, override)
     if not data:
-        # No explicit preset/config: reuse what `hca init` resolved so bare
-        # `hca up` / `hca doctor` / `hca watch` keep the initialized fleet.
+        # No explicit preset/config: reuse only the connection-free scheduling
+        # snapshot. Package-preset endpoints are reconstructed; custom values
+        # must be supplied at runtime and are never stored in HCA state.
         snap = resolved_snapshot_path(state_dir)
         if snap.is_file():
-            data = json.loads(snap.read_text(encoding="utf-8"))
+            snapshot_path = snap
+            snapshot_data = json.loads(snap.read_text(encoding="utf-8"))
+            preset_name = str(snapshot_data.get("preset", "") or "")
+            if preset_name:
+                try:
+                    data = load_toml(resolve_preset_path(preset_name))
+                except FileNotFoundError:
+                    data = {}
+            data = _deep_merge(data, snapshot_data)
+            runtime = snapshot_data.get("runtime", {})
+            backend_data = data.setdefault("backend", {})
+            if runtime.get("endpoint_required"):
+                backend_data["endpoint"] = os.environ.get("HCA_BACKEND_ENDPOINT", "")
+            if runtime.get("metrics_url_required"):
+                backend_data["metrics_url"] = os.environ.get(
+                    "HCA_BACKEND_METRICS_URL", ""
+                )
+            if runtime.get("auxiliary_endpoint_required"):
+                backend_data["auxiliary_endpoint"] = os.environ.get(
+                    "HCA_AUXILIARY_ENDPOINT", ""
+                )
     cfg = fleet_from_dict(data)
     if endpoint:
         cfg.backend.endpoint = endpoint
@@ -280,6 +357,17 @@ def load_fleet_config(
         cfg.state_dir = os.path.expanduser(state_dir)
     elif not cfg.state_dir:
         cfg.state_dir = os.path.expanduser(f"~/.hca/{cfg.name}")
+    # Migrate legacy snapshots that serialized endpoint/cluster connection
+    # details. They may configure this one invocation, then are replaced with
+    # the scheduling-only form so sensitive values do not remain at rest.
+    if snapshot_path is not None and (
+        any(
+            key in (snapshot_data.get("backend") or {})
+            for key in ("endpoint", "metrics_url", "auxiliary_endpoint")
+        )
+        or "cluster" in snapshot_data
+    ):
+        write_resolved_snapshot(cfg)
     return cfg
 
 

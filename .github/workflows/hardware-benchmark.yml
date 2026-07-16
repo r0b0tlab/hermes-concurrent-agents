@@ -1,0 +1,93 @@
+name: Optional GB10 acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      fleet_config:
+        description: Existing owner-controlled HCA fleet TOML on the runner
+        required: true
+        type: string
+      source_profile:
+        description: Existing Hermes source profile (no credentials are copied)
+        required: true
+        default: default
+        type: string
+      live_canary:
+        description: Run one bounded c1 goal through the existing endpoint
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hca-gb10-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  gb10-acceptance:
+    name: Manual GB10 control-plane acceptance
+    runs-on: [self-hosted, linux, arm64, gb10]
+    timeout-minutes: 30
+    env:
+      HCA_FLEET_CONFIG: ${{ inputs.fleet_config }}
+      HCA_SOURCE_PROFILE: ${{ inputs.source_profile }}
+      HCA_VENV: ${{ runner.temp }}/hca-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install HCA in an isolated environment
+        run: |
+          python3 -m venv "$HCA_VENV"
+          "$HCA_VENV/bin/python" -m pip install -e ".[dev]"
+      - name: Deterministic orchestration gate
+        run: |
+          "$HCA_VENV/bin/python" scripts/run-orchestration-acceptance.py
+      - name: Read-only capability and ownership preflight
+        run: |
+          "$HCA_VENV/bin/hca" doctor --config "$HCA_FLEET_CONFIG" --json
+      - name: Optional bounded c1 canary against existing infrastructure
+        if: ${{ inputs.live_canary }}
+        run: |
+          "$HCA_VENV/bin/hca" run \
+            --config "$HCA_FLEET_CONFIG" \
+            --source-profile "$HCA_SOURCE_PROFILE" \
+            --concurrency 1 \
+            --review never \
+            --budget wall_seconds=600 \
+            --budget max_workers=1 \
+            --budget max_tasks=2 \
+            --idempotency-key "hardware-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --json \
+            "Return one concise fact proving this existing HCA endpoint is usable."
+      - name: Verify no HCA ownership leaks
+        if: always()
+        run: |
+          "$HCA_VENV/bin/python" - <<'PY'
+          import json, os, sqlite3, tomllib
+          from pathlib import Path
+          # The workflow never starts/provisions a model and never kills workloads.
+          # Inspect only HCA-owned lease records in the explicitly supplied fleet.
+          with Path(os.environ["HCA_FLEET_CONFIG"]).expanduser().open("rb") as handle:
+              fleet = tomllib.load(handle)
+          state = Path(fleet.get("fleet", {}).get("state_dir", "~/.hca")).expanduser()
+          db = state / "hca.sqlite"
+          if not db.is_file():
+              print(json.dumps({"state_db": "absent", "cleanup": "run completion barrier passed"}))
+          else:
+              con = sqlite3.connect(db)
+              tables = {
+                  row[0]
+                  for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+              }
+              leases = (
+                  con.execute("SELECT COUNT(*) FROM leases").fetchone()[0]
+                  if "leases" in tables
+                  else 0
+              )
+              print(json.dumps({"state_dir": str(state), "active_leases": leases}))
+              assert leases == 0
+          PY
+      - name: Remove isolated tooling environment
+        if: always()
+        run: rm -rf -- "$HCA_VENV"

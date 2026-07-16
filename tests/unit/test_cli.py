@@ -1,3 +1,6 @@
+import json
+
+import hca.cli as cli
 from hca.cli import build_parser, main
 from hca.observe import redact_text
 
@@ -17,6 +20,42 @@ def test_redact():
 
 def test_main_presets_exit_zero():
     assert main(["presets"]) == 0
+
+
+def test_plan_json_never_serializes_connection_string(capsys):
+    endpoint = "https://alice:sensitive@inference.example.invalid/v1"
+    assert main(["plan", "--endpoint", endpoint, "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["endpoint_scope"] == "remote"
+    assert "endpoint" not in payload
+    for forbidden in (endpoint, "alice", "sensitive", "inference.example.invalid"):
+        assert forbidden not in str(payload)
+
+
+def test_init_dry_run_has_no_state_or_connection_output(monkeypatch, tmp_path, capsys):
+    endpoint = "https://alice:sensitive@inference.example.invalid/v1"
+    state_dir = tmp_path / "must-not-exist"
+    monkeypatch.setattr(cli, "init_profiles", lambda *_args, **_kwargs: ["hca-general-01"])
+    assert (
+        main(
+            [
+                "init",
+                "--dry-run",
+                "--endpoint",
+                endpoint,
+                "--state-dir",
+                str(state_dir),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["endpoint_scope"] == "remote"
+    assert "backend" not in payload
+    assert not state_dir.exists()
+    for forbidden in (endpoint, "alice", "sensitive", "inference.example.invalid"):
+        assert forbidden not in str(payload)
 
 
 def test_task_swarm_workers_is_rejected_not_ignored(capsys):

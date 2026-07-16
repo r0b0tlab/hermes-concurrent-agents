@@ -12,15 +12,15 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hca import __version__
+from hca.backends import openai_compat as oai
 from hca.bench import run_bench
-from hca.config import config_shape, list_presets, load_fleet_config
+from hca.config import list_presets, load_fleet_config, write_resolved_snapshot
 from hca.doctor import run_doctor
 from hca.hermes_compat import HermesCompatError, hermes_version, run_hermes
 from hca.logs import follow_log, read_log, worker_log_id
 from hca.observe import format_status_table, peek_slot, status_rows
 from hca.profiles import init_profiles
 from hca.resources import fetch_capacity
-from hca.ssh_exec import run_ssh
 from hca.state import StateDB
 from hca.supervisor import Supervisor
 from hca.tmux import TmuxManager, sanitize_session_name
@@ -35,6 +35,29 @@ def _print(data: Any, as_json: bool = False) -> None:
             print(data["text"])
         else:
             print(data)
+
+
+def _unsupported_remote_placement(action: str, as_json: bool = False) -> int:
+    """Fail before side effects when a legacy multi-node mutation is requested."""
+    payload = {
+        "ok": False,
+        "code": 3,
+        "action": action,
+        "state": "unsupported",
+        "message": (
+            "remote agent placement is unsupported: Hermes Kanban SQLite is local "
+            "task truth and HCA has no supported remote claim/heartbeat transport"
+        ),
+        "remediation": (
+            "run HCA workers on the Kanban board host; a remote model endpoint remains "
+            "supported through the selected Hermes profile"
+        ),
+    }
+    if as_json:
+        _print(payload, True)
+    else:
+        print(f"{payload['message']}\n  → {payload['remediation']}", file=sys.stderr)
+    return 3
 
 
 def _cfg_from_args(args: argparse.Namespace):
@@ -72,11 +95,13 @@ def cmd_presets(_args) -> int:
 
 def cmd_init(args) -> int:
     cfg = _cfg_from_args(args)
-    Path(cfg.state_dir).mkdir(parents=True, exist_ok=True)
-    snap = Path(cfg.state_dir) / "fleet.resolved.json"
+    if cfg.role.value != "single":
+        return _unsupported_remote_placement("init", args.json)
     if not args.dry_run:
-        # TOML-shaped snapshot: bare `hca up`/`doctor`/`watch` reload this fleet
-        snap.write_text(json.dumps(config_shape(cfg), indent=2), encoding="utf-8")
+        Path(cfg.state_dir).mkdir(parents=True, exist_ok=True)
+        # Persist scheduling data only. Preset endpoints are reconstructed;
+        # custom endpoint/metrics values must be supplied at runtime.
+        write_resolved_snapshot(cfg)
         StateDB(Path(cfg.state_dir) / "hca.sqlite")
         (Path(cfg.state_dir) / "logs").mkdir(exist_ok=True)
         (Path(cfg.state_dir) / "worktrees").mkdir(exist_ok=True)
@@ -90,7 +115,7 @@ def cmd_init(args) -> int:
         "preset": cfg.preset,
         "state_dir": cfg.state_dir,
         "board": cfg.board,
-        "backend": cfg.backend.endpoint,
+        "endpoint_scope": oai.endpoint_scope(cfg.backend.endpoint),
         "model": cfg.backend.model,
         "engine": cfg.backend.engine.value,
         "profiles": profiles,
@@ -231,6 +256,8 @@ def cmd_up(args) -> int:
         from hca.models import FleetRole
 
         cfg.role = FleetRole(args.role)
+    if cfg.role.value != "single":
+        return _unsupported_remote_placement("up", args.json)
     sup = Supervisor(cfg)
     if args.daemon:
         print(
@@ -632,7 +659,7 @@ def cmd_plan(args) -> int:
         "fleet": cfg.name,
         "board": cfg.board,
         "engine": cfg.backend.engine.value,
-        "endpoint": cfg.backend.endpoint,
+        "endpoint_scope": oai.endpoint_scope(cfg.backend.endpoint),
         "slots": slots,
         "max_top_level_runs": cfg.capacity.max_top_level_runs,
         "max_total_sequences": cfg.capacity.max_total_sequences,
@@ -689,27 +716,7 @@ def cmd_cluster_doctor(args) -> int:
 
 
 def cmd_cluster_nodes_up(args) -> int:
-    cfg = _cfg_from_args(args)
-    path = Path(cfg.state_dir) / "nodes.json"
-    if not path.exists():
-        print("no nodes.json — run: hca cluster nodes add HOST...", file=sys.stderr)
-        return 1
-    nodes = json.loads(path.read_text(encoding="utf-8"))
-    results = []
-    for n in nodes:
-        host = n["host"]
-        remote = "hca up --role node || true"
-        res = run_ssh(host, remote, batch_mode=True, timeout=120)
-        results.append(
-            {
-                "host": host,
-                "ok": res.ok,
-                "stdout": res.stdout[-500:],
-                "stderr": res.stderr[-500:],
-            }
-        )
-    _print(results, args.json)
-    return 0 if all(r["ok"] for r in results) else 1
+    return _unsupported_remote_placement("cluster.nodes.up", args.json)
 
 
 def cmd_bench(args) -> int:
@@ -917,13 +924,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_com.add_argument("task_id")
     p_com.add_argument("text")
 
-    p_cl = sp.add_parser("cluster", parents=[common], help="Cluster inventory/doctor/up")
+    p_cl = sp.add_parser(
+        "cluster",
+        parents=[common],
+        help="Experimental read-only SSH inventory/doctor (remote placement unsupported)",
+    )
     cl_sp = p_cl.add_subparsers(dest="cluster_cmd")
     p_nodes = cl_sp.add_parser("nodes", parents=[common])
     n_sp = p_nodes.add_subparsers(dest="nodes_cmd")
     p_nodes_add = n_sp.add_parser("add", parents=[common])
     p_nodes_add.add_argument("hosts", nargs="+")
-    n_sp.add_parser("up", parents=[common])
+    n_sp.add_parser(
+        "up", parents=[common], help="Unsupported legacy command; exits before SSH"
+    )
     cl_sp.add_parser("doctor", parents=[common])
 
     p_bench = sp.add_parser(

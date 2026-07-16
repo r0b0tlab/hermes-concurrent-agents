@@ -1,45 +1,81 @@
 # Architecture
 
-## Goal
+## Product flow
 
-Run many **isolated Hermes Agent sessions** against one (or per-node) shared **vLLM or SGLang** backend on **DGX Spark / GB10**, so a large task completes under concurrent admission without KV/session collisions.
+```text
+one user goal
+  → small bounded team + validated dependency graph
+  → Hermes Kanban task/run truth
+  → concrete profile/worktree worker slots
+  → admission + exact ownership + supervision
+  → conditional review/rework or scoped human input
+  → one evidence-backed result + cleanup state
+```
 
-## Planes
+HCA is deliberately narrower than a general agent framework. It reuses Hermes
+profiles, sessions, Kanban, workspaces, artifacts, plugins, and approvals.
+
+## Planes and ownership
 
 | Plane | Owner | Responsibility |
 |---|---|---|
-| Task truth | Hermes Kanban | create/claim/complete/block, deps, goals, swarm graphs |
-| Control | `hca` supervisor | leader lock, warm slots, admit-before-claim, `dispatch_once(spawn_fn=…)` |
-| Execution isolation | tmux + profiles | durable slots `hca-<fleet>-<role>-NN`, separate HERMES_HOME |
-| Inference | vLLM or SGLang | continuous batching, OpenAI `/v1` |
-| Observability | `hca watch/peek/logs/activity/transcript` | human visibility without attach-by-default |
-| Cluster fabric | passwordless SSH | after NVIDIA connect-* playbooks |
+| Goal/result service | HCA `FleetService` | Versioned run operations, idempotency, result schemas |
+| Task truth | Hermes Kanban | Tasks, dependencies, claims, run rows, comments, completion |
+| Graph boundary | HCA controller | Validated child IDs, review/rework/final barriers, expansion denial |
+| Admission/routing | HCA | Capacity, concrete free slot reservation before claim |
+| Worker execution | Hermes + tmux | Task-scoped session in a concrete profile/workspace |
+| Process ownership | HCA | PID + start ticks + process group, restart-safe reconciliation |
+| Model/provider/tools | Hermes/operator | Credentials, endpoint, model, fallback, ordinary tools |
+| Optional telemetry | HCA adapters | Conservative admission signals; never serving ownership |
 
-## Isolation boundaries
+HCA state is a mapping/projection and ownership journal, not a second editable
+Kanban database.
 
-1. **Process**: one Hermes worker process per run (tmux pane).
-2. **Session**: separate Hermes session / profile home — no shared in-process KV/session state across workers.
-3. **Workspace**: git worktrees for writers; shared-readonly for research/qa.
-4. **Shared only**: model weights + continuous batcher on the engine.
+## Concurrency
 
-## Admission
+One-step work uses one worker. Multiple acceptance criteria do not automatically
+fan out: the caller must declare them independent. The admitted wave is bounded
+by validated ready DAG width, requested concurrency, concrete free slots, role
+caps, active leases, configured sequence credits, memory hysteresis, disk
+headroom, and optional endpoint telemetry.
 
-Credits estimate task weight (class, long context, subagents). Cap top-level runs and total sequence credits. Drain flag blocks new admits. Engine capacity adapters normalize vLLM/SGLang metrics.
+Unknown telemetry is conservative unknown, never unlimited capacity. No
+universal worker count is encoded as a product claim.
 
-## Subagents
+## Isolation and ownership
 
-Short-lived `delegate_task` bursts only, under global lease budget (`HCA_MAX_SUBAGENT_CREDITS` + plugin). Durable parallel work → Kanban children → tmux slots.
+- **Profile/session:** one concrete Hermes profile/session per active task.
+- **Workspace:** canonical task worktree for writers; explicit policy for
+  read-only/no-workspace roles.
+- **Process:** one exact PID/start-tick/process-group identity per worker run.
+- **Logs:** board/task/upstream-run names prevent board-local run-ID collisions.
+- **Graph:** only persisted HCA child IDs are dispatchable; unauthorized tasks
+  are quarantined and audited.
 
-## Cluster
+These controls prevent accidental cross-task contamination in tested workflows.
+They do not claim a host sandbox against malicious same-user code.
 
-- One control Spark owns Kanban SQLite (never NFS).
-- Nodes run the same supervisor locally.
-- Control places work and probes via `ssh BatchMode`.
-- Default: colocate Hermes with the node’s engine (ports 8000 vLLM / 30000 SGLang).
+## Completion and recovery
+
+A task row becoming terminal is insufficient while its exact worker remains
+live. Final state is derived from upstream terminal evidence, result/artifact
+handoff, required review, open questions, and exact worker liveness. Restart
+reconciliation releases stale claims/leases only after ownership checks and
+never signals a reused PID.
+
+## Remote boundary
+
+Stable HCA is single-host for workers and Kanban task truth. A model endpoint may
+be remote through Hermes. Remote agent placement is unsupported because no safe
+remote Kanban claim/heartbeat transport is available. HCA does not introduce a
+distributed task database, NFS SQLite, or ad hoc replication.
 
 ## Non-goals
 
-- Second web dashboard
-- Join-token mesh when SSH already works
-- Replacing Hermes Kanban
-- Claiming universal concurrency numbers without `hca bench`
+- Provisioning, serving, or qualifying models
+- Provider normalization or endpoint fallback
+- Replacing Hermes Kanban, profiles, sessions, artifacts, or approvals
+- Universal capability brokering
+- Host-level sandboxing
+- Stable remote agent placement
+- Universal performance/concurrency claims

@@ -123,10 +123,16 @@ def run_doctor(cfg: FleetConfig, *, tools_probe: bool = False) -> DoctorReport:
             checks,
             "backend.local_only",
             False,
-            f"endpoint {cfg.backend.endpoint} is not local/private; pass allow_remote or disable local_only",
+            "configured endpoint is remote while local_only is enabled; disable local_only explicitly",
         )
     else:
-        _add(checks, "backend.local_only", True, f"endpoint={cfg.backend.endpoint}", "info")
+        _add(
+            checks,
+            "backend.local_only",
+            True,
+            f"endpoint_scope={oai.endpoint_scope(cfg.backend.endpoint)}",
+            "info",
+        )
 
     # engine + model
     _add(checks, "backend.engine", True, cfg.backend.engine.value, "info")

@@ -1,6 +1,12 @@
 # hermes-concurrent-agents: Community Release Plan
 
-> **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
+> **Historical and superseded. Do not execute.** This 2026-05 plan predates the
+> bounded goal-to-team service and contains obsolete model-launch, fixed-worker,
+> and release instructions. Current truth is in
+> [Current state](../current-state-report.md),
+> [Support matrix](../support-matrix.md), and [Migration](../migration.md).
+
+> **Historical instruction:** Use subagent-driven-development task-by-task.
 
 **Goal:** Make hermes-concurrent-agents production-ready and shareable with the Hermes Agent community — all docs accurate, all scripts tested, GitHub updated.
 
@@ -124,7 +130,7 @@ Same changes as README — vLLM primary, SGLang marked experimental.
 
 ### Task 11: Commit all changes and push
 ```bash
-cd /home/mr-r0b0t/projects/hermes-concurrent-agents
+cd ~/projects/hermes-concurrent-agents
 git add -A
 git commit -m "feat: vLLM Marlin backend, tested on GB10 with 3-agent swarm
 

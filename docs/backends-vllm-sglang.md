@@ -1,50 +1,66 @@
-# vLLM and SGLang — equal first-class backends
+# Existing vLLM and SGLang endpoints
 
-Both engines share the HCA surface: `backend.engine`, OpenAI-compatible endpoint, doctor probes, normalized `capacity()`, presets, and benches.
+HCA does **not** install, launch, stop, replace, or own a model server. Configure
+vLLM, SGLang, a hosted provider, or another OpenAI-compatible endpoint through
+Hermes and operator-owned infrastructure first. NVIDIA's current DGX Spark
+playbooks are the upstream reference for Spark serving containers and flags.
 
-| | vLLM | SGLang |
+HCA's optional backend adapters consume health and admission signals only:
+
+| Adapter | Health probes | Optional telemetry |
 |---|---|---|
-| Preset | `gb10-vllm` | `gb10-sglang` |
-| Typical URL | `http://127.0.0.1:8000/v1` | `http://127.0.0.1:30000/v1` |
-| NVIDIA playbook | [vllm](https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/vllm) | [sglang](https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/sglang) |
-| Adapter | `hca.backends.vllm` | `hca.backends.sglang` |
+| vLLM | `/v1/models` | Prometheus request, cache, and scheduler metrics |
+| SGLang | `/health`, `/v1/models` | Prometheus running/queued/token metrics |
+| Generic OpenAI-compatible | `/v1/models`, bounded chat/tool probe | No fabricated capacity signal |
+
+Missing or schema-drifted telemetry becomes unknown/degraded rather than zero.
+
+## Select an existing endpoint
 
 ```bash
-hca init --preset gb10-vllm --model <served-model-id>
+hca init --preset gb10-vllm --model <served-model-id> --source-profile default
 # or
-hca init --preset gb10-sglang --model <served-model-id>
-hca doctor
+hca init --preset gb10-sglang --model <served-model-id> --source-profile default
+hca doctor --tools
 ```
 
-Launch packs under `config/vllm/` and `config/sglang/` thin-wrap NVIDIA recipes (do not invent Spark-only forks of flags). Prefer playbook-current containers and options.
+The source Hermes profile remains provider/config/credential authority. HCA does
+not copy its connection string into fleet state. Package-preset localhost URLs
+can be reconstructed from package data; custom URLs must be supplied at runtime
+with `--config`, `--endpoint`, or `HCA_BACKEND_ENDPOINT`.
 
-## Hermes tool-calling requirements
+## Tool and context requirements
 
-Hermes agents need working tool calls from the endpoint
-([providers doc](https://hermes-agent.nousresearch.com/docs/integrations/providers)):
+Use the model/runtime parser and chat template documented for the exact model.
+Validate tool calls with `hca doctor --tools`; do not infer support from an image
+name or launch flag alone.
 
-- **vLLM:** launch with `--enable-auto-tool-choice --tool-call-parser hermes`
-- **SGLang:** launch with `--tool-call-parser qwen` (or the parser matching your model)
-- Both: serve **≥64k context** (`--max-model-len` / `--context-length`) — Hermes requires it for agent use.
+There is no universal HCA context-length minimum. Choose a context window from
+the model's supported limit and the measured workload. Longer context consumes
+more KV capacity and can lower safe concurrency.
 
-The shipped launch packs set these by default. Verify with `hca doctor --tools`.
+## Admission behavior
 
-## Metrics
+- Adapter telemetry is advisory input to HCA's sequence-credit admission.
+- When telemetry is unavailable, HCA uses the conservative configured limit.
+- GB10 defaults are starting points, not universal performance claims.
+- HCA never restarts an endpoint or flushes host caches as recovery.
+- `endpoint_changed` or stale telemetry causes a conservative hold/fallback,
+  not guessed capacity.
 
-- vLLM exposes Prometheus metrics at `:8000/metrics` out of the box.
-- SGLang needs `--enable-metrics` (set in the shipped launch pack) for `:30000/metrics`;
-  without it HCA falls back to `/health`-only capacity checks.
+## Multi-node inference
 
-## UMA note (DGX Spark)
+A Hermes profile may address an operator-owned endpoint on another host or an
+operator-managed sharded serving deployment. HCA's controller, workers, Kanban
+board, state, and workspaces still remain on one host. This is remote inference,
+not remote agent placement.
 
-If memory pressure appears within capacity, NVIDIA documents:
+## Upstream references
 
-```bash
-sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
-```
+- [Hermes provider configuration](https://hermes-agent.nousresearch.com/docs/integrations/providers)
+- [NVIDIA DGX Spark playbooks](https://github.com/NVIDIA/dgx-spark-playbooks)
+- [vLLM documentation](https://docs.vllm.ai/)
+- [SGLang documentation](https://docs.sglang.ai/)
 
-HCA must not run this automatically mid-fleet unless explicitly configured. Prefer lowering concurrency via admission / `hca bench`.
-
-## Security
-
-Bind engines to localhost on single-node fleets. On clusters, keep OpenAI ports node-local; Hermes workers colocate with the engine on the same Spark.
+These projects retain their own licenses and trademarks. HCA is not affiliated
+with or endorsed by their maintainers.

@@ -1,71 +1,85 @@
-# Operations
+# Operations and recovery
 
-## Day-1 single Spark
+## Day 1
+
+Configure Hermes first, then initialize bounded HCA profiles from that source:
 
 ```bash
-pip install -e ".[dev]"
-# start vLLM :8000 or SGLang :30000 per NVIDIA playbook
-hca init --preset gb10-vllm --model <id>
+hca init --preset generic-linux --model <served-model-id> --source-profile default
 hca doctor
-hca up --daemon   # or one-shot hca up
-hca watch
-hca task add "Do the thing" --assignee coder-worker
+hca run --source-profile default "Complete one bounded verified task"
 ```
 
-## Safe stop
+Use a GB10 preset only when its external endpoint already exists. HCA never
+starts or replaces a model server as part of this workflow.
+
+## Run lifecycle
 
 ```bash
-hca drain              # stop admits
-hca down               # drain; keep slots
-hca down --kill        # signal running panes
-hca down --kill --slots  # also destroy warm slots
-hca drain --clear      # re-enable admits
+hca run-status <run-id>
+hca respond <run-id> <question-id> "answer"
+hca collect <run-id>
+hca stop <run-id>
 ```
 
-## Observe
+- `run-status` reports task state, questions, exact ownership, and blockers.
+- `respond` answers one open question and resumes only that branch.
+- `collect` refuses empty or premature success and emits a deterministic SHA-256
+  manifest.
+- `stop` persists `stopping`, signals exact owned groups, preserves partial work,
+  and ends as `cancelled` rather than success.
+
+## Fleet admission controls
 
 ```bash
-hca ps
-hca peek hca-gb10-coder-01
-hca activity --follow
-hca transcript <task-or-run>
-hca logs <run> --follow
-hca explain waiting
+hca drain         # stop new admission; active work remains supervised
+hca drain --clear # admit again after inspection
+hca plan --json   # configuration estimate, not a performance result
 ```
 
-## Capacity
+Lower-level `hca up`, `ps`, `watch`, `peek`, `logs`, and `activity` commands are
+diagnostics for the same-host fleet. They are not prerequisites for detached
+`hca run` when the controller can start normally.
 
-```bash
-hca plan --json
-hca bench --engine vllm --model <id> --levels 1,2,3,4,6,8
-hca bench --engine sglang --endpoint http://127.0.0.1:30000/v1 --model <id>
-```
+Set concurrency from exact workload evidence. Memory high/low watermarks use
+hysteresis; unavailable endpoint metrics retain the conservative configured
+sequence ceiling.
 
-Set `capacity.max_top_level_runs` / `max_total_sequences` from the measured knee — never invent universal N.
+## One dispatcher
 
-## One dispatcher only
+HCA establishes sole dispatcher ownership before creating any ready Kanban task.
+A live Hermes gateway dispatcher targeting the same board is a fail-closed
+conflict. Disable gateway dispatch for the HCA board or use a separate board;
+do not let two controllers race claims.
 
-The Hermes gateway can run its own Kanban dispatcher for the same board
-(`HERMES_KANBAN_DISPATCH_IN_GATEWAY`). Run **either** the gateway dispatcher
-**or** `hca up`, never both against one board — two dispatchers race for the
-same ready tasks and the gateway's spawns bypass HCA slots, admission, and
-observability. If `hermes gateway` runs on the box, disable its kanban
-dispatch or point HCA at a dedicated board.
+## Recovery procedure
 
-## UMA recovery (manual)
+1. Read `hca run-status <run-id>` and `hca activity` before changing anything.
+2. Verify the recorded PID and start ticks against live ownership.
+3. Restart the HCA controller/supervisor; reconciliation is preferred over
+   manual SQLite or tmux edits.
+4. Answer a persisted question with `hca respond`, or cancel deliberately with
+   `hca stop`.
+5. Preserve dirty/unmerged worktrees and collect partial evidence.
+6. Confirm zero active leases, live exact workers, and HCA-owned panes after a
+   terminal run.
 
-```bash
-sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
-```
+Do not manually reset schema markers, delete SQLite WAL files, kill broad process
+patterns, drop system caches, or destroy unrelated tmux sessions.
 
-Do not automate mid-fleet unless explicitly configured.
+## Common failures
 
-## Troubleshooting
-
-| Symptom | Check |
+| Symptom | Meaning / action |
 |---|---|
-| doctor FAIL models | Engine up? model id match `/v1/models`? |
-| dispatch skipped | `hca explain x` — drain? capacity? backend healthy? |
-| tmux missing | `hca up` warm slots; socket name in preset |
-| cluster ssh FAIL | BatchMode, same username, NVIDIA discover-sparks |
-| attach hangs | use peek first; attach is interactive |
+| Compatibility preflight code `3` | Install the verified Hermes release or resolve the reported capability drift |
+| Sole-dispatcher conflict | Disable gateway dispatch for this board before retrying |
+| Admission wait | Inspect memory, disk, slots, active leases, and sequence-credit reason |
+| `needs_input` | Answer the exact recorded question; do not edit task rows manually |
+| Blocked: no evidence | Worker completed without result/artifact evidence; inspect its upstream run summary/log |
+| Remote placement unsupported | Keep workers/Kanban local; configure only the model endpoint through Hermes |
+| Terminal task with live worker | Wait for or reconcile exact process cleanup; HCA must not report success yet |
+
+## Upgrade and uninstall
+
+Follow [Migration and uninstall](migration.md). State and profile backups are
+owner-only and forward-only migrations fail closed on unknown future versions.

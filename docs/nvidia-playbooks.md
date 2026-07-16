@@ -1,32 +1,43 @@
-# NVIDIA DGX Spark playbooks — HCA index
+# NVIDIA DGX Spark playbooks — HCA reference
 
-HCA composes with NVIDIA playbooks; it does not reimplement Spark networking or engine installs.
+HCA may consume infrastructure prepared with NVIDIA playbooks; it does not
+reimplement Spark networking, install drivers, launch serving containers, or
+own a distributed agent fabric.
 
-| Topic | Playbook |
+| Topic | Upstream playbook |
 |---|---|
-| Index | https://github.com/NVIDIA/dgx-spark-playbooks |
-| Laptop SSH / mDNS / NVIDIA Sync | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/connect-to-your-spark |
-| 2-node QSFP + passwordless SSH | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/connect-two-sparks |
-| 3-node ring | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/connect-three-sparks |
-| N-node switch | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/multi-sparks-through-switch |
-| NCCL | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/nccl |
-| vLLM | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/vllm |
-| SGLang (CUDA 13 image `lmsysorg/sglang:latest-cu130`) | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/sglang |
-| TensorRT-LLM (`trtllm-serve`, :8355) | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/trt-llm |
-| llama.cpp (native build, sm_121a) | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/llama-cpp |
-| Hermes + local vLLM | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/hermes-agent |
-| Tailscale | https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/tailscale |
-| Forum | https://forums.developer.nvidia.com/c/accelerated-computing/dgx-spark-gb10 |
+| Index | <https://github.com/NVIDIA/dgx-spark-playbooks> |
+| Connect to one Spark | <https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/connect-to-your-spark> |
+| Two/three/switch networking | <https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia> |
+| NCCL | <https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/nccl> |
+| vLLM | <https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/vllm> |
+| SGLang | <https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/sglang> |
+| Hermes Agent | <https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/hermes-agent> |
 
-## HCA sequence on Spark
+## Supported single-host sequence
 
-1. Complete relevant NVIDIA connect-* playbook (same username, QSFP, `discover-sparks`).
-2. Start vLLM or SGLang per NVIDIA recipe (ports 8000 / 30000).
-3. `pip install -e .` in this repo; `hca init --preset gb10-vllm --model <served>`.
-4. `hca doctor && hca up && hca watch`.
-5. Cluster: `hca cluster nodes add … && hca cluster doctor && hca cluster nodes up`.
+1. The operator prepares one GB10 and an existing model endpoint independently
+   of HCA.
+2. Configure and authenticate a Hermes source profile for that endpoint.
+3. Install HCA and initialize a single-host preset:
 
-## Multi-node modes
+   ```bash
+   hca init --preset gb10-vllm --model <served-model-id> --source-profile default
+   # or: --preset gb10-sglang
+   hca doctor
+   ```
 
-- **Agent fleet (default):** per-node engine + Hermes workers; SSH control plane.
-- **Sharded serve (optional):** multi-node vLLM/NCCL for one large model; configure HCA backend endpoint only.
+4. Start work through `hca run`, then inspect and collect the result.
+
+HCA never starts, stops, replaces, or reconfigures a protected serving workload
+as part of ordinary orchestration.
+
+## Multi-node networking boundary
+
+NVIDIA connect/NCCL playbooks can support an inference endpoint spanning or
+hosted on other nodes. HCA may use that endpoint through a Hermes profile while
+its controller, Kanban board, workers, state, and workspaces remain on one host.
+
+Completing a networking playbook does not enable HCA remote agent placement.
+Read-only SSH reachability is not placement/recovery evidence. See
+[Remote placement and GB10 clusters](gb10-cluster.md).

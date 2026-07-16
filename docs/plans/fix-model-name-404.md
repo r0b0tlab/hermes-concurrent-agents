@@ -1,5 +1,10 @@
 # Fix: Subagent model name 404 errors
 
+> **Historical record — superseded and not executable.** This predates the HCA 2.0
+> single-host control-plane boundary. Current HCA does not normalize provider/model
+> names, select a delegated child model, or own model-serving configuration. Hermes
+> profiles remain authoritative; follow the current README and support matrix.
+
 ## Root cause
 
 vLLM serves the model with `--served-model-name nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4` (full path).

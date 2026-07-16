@@ -1,27 +1,47 @@
-# Current state (2026-07-12)
+# Current state
 
-## Product
+`hermes-concurrent-agents` is an **alpha, single-host Hermes team orchestration
+control plane**. Its product path is one goal → bounded persisted task graph →
+concrete isolated Hermes workers → optional review/rework → one evidence-backed
+result.
 
-`hermes-concurrent-agents` **v2.0.0** — GB10-first control plane (`hca`) for concurrent isolated Hermes sessions on vLLM/SGLang.
+## Implemented and exercised
 
-## Implemented
+- Human operations: `hca run`, `run-status`, `respond`, `collect`, and `stop`.
+- Equivalent five-tool Hermes plugin surface backed by the same `FleetService`.
+- Explicit decomposition barrier and controller-owned persisted graph.
+- One-step/one-worker behavior and explicit independence required for fan-out.
+- Concrete profile/worktree routing with reservation-before-claim admission.
+- Exact PID plus procfs start-tick ownership and bounded process-group cleanup.
+- Restart-safe run state, questions, cancellation, review/rework, and result
+  manifests.
+- Conservative admission when device or endpoint telemetry is unavailable.
+- Stable Hermes private-API compatibility lane for `0.18.2 / 2026.7.7.2`.
+- Generic deterministic endpoint tests and on-device single-GB10 orchestration
+  acceptance.
 
-- Python package + CLI: init, doctor, up/drain/down, ps/watch, peek/attach/logs, activity/transcript/inspect/explain, plan, bench, task, cluster, dashboard
-- Durable tmux slots, state DB, leader lock, drain flag
-- Kanban `dispatch_once(spawn_fn=tmux)` adapter
-- vLLM + SGLang equal first-class adapters + admission
-- Workspaces (worktree policy)
-- Subagent budget plugin hook
-- GB10 / cluster presets; NVIDIA playbook alignment docs
-- CI: Linux GitHub runners for unit/smoke only (not a GB10/perf substitute); validate on Spark with `hca doctor` / `bench`
-- Unit + Hermes contract tests
+The generated [support matrix](support-matrix.md) is authoritative for release
+claims. CI separates required stable-Hermes contracts from an advisory latest-
+main drift probe.
 
-## Authoritative plan
+## Explicit limitations
 
-[docs/plans/2026-07-12-hermes-agent-modernization.md](plans/2026-07-12-hermes-agent-modernization.md)
+- Remote agent placement is unsupported. Legacy remote-start paths fail before
+  SSH or worker/profile side effects. Read-only SSH inventory/doctor helpers are
+  experimental and do not prove placement support.
+- HCA does not provision or serve models, normalize providers, own credentials,
+  or implement endpoint fallback. Those remain Hermes/operator concerns.
+- Host-level filesystem sandboxing is not claimed. HCA proves task-scoped
+  profiles/worktrees and checks cross-task writes in controlled fixtures.
+- macOS is a portable CI target, not an on-device acceptance claim.
+- No universal optimal worker count or performance multiplier is claimed.
+- Cluster presets have been removed from the stable package surface.
 
-## Superseded
+## Release status
 
-- Stale INTEGRATION_PLAN → pointer only
-- Fixed “3 workers” folklore → measure with `hca bench`
-- SGLang “experimental” → first-class
+No package, tag, GitHub Release, or remote agent-placement feature is implied by
+this report. Build artifacts are verification inputs until the complete clean-
+install, detached-worktree, anonymous-clone, and public-source gates pass.
+
+For upgrade and rollback behavior, see [Migration](migration.md). For process,
+credential, approval, and graph boundaries, see [Security](security.md).

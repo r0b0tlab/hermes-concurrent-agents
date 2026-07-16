@@ -5,41 +5,176 @@ on:
     branches: [main, master]
   pull_request:
 
-# Product target is DGX Spark / GB10 (Linux). GitHub-hosted runners only gate
-# portable unit tests + CLI smoke. They are not a performance or GB10 substitute.
-# On-box validation: hca doctor / hca bench / fleet smoke on the Spark itself.
+permissions:
+  contents: read
+
+concurrency:
+  group: hca-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HERMES_STABLE_TAG: v2026.7.7.2
+  HERMES_STABLE_COMMIT: 9de9c25f620ff7f1ce0fd5457d596052d5159596
 
 jobs:
-  test:
-    name: Linux unit + smoke
+  unit-static:
+    name: Unit/static · Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux
-      - name: Install package
-        run: pip install -e ".[dev]"
-      - name: Lint
-        run: ruff check src tests
-      - name: Unit tests
-        run: pytest -q tests/unit
-      - name: Contract tests (skip if hermes absent)
-        run: pytest -q tests/contract || true
-      - name: CLI smoke
+      - name: Install HCA development dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Required static and unit gate
+        run: scripts/release-check.sh --quick
+
+  stable-hermes-contract:
+    name: Required Hermes ${{ env.HERMES_STABLE_TAG }} contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out pinned stable Hermes
+        uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ env.HERMES_STABLE_TAG }}
+          path: _hermes
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Verify immutable Hermes authority
+        working-directory: _hermes
+        run: test "$(git rev-parse HEAD)" = "$HERMES_STABLE_COMMIT"
+      - name: Install tmux, HCA, and pinned Hermes
         run: |
-          hca version
-          hca presets
-          hca plan --preset generic-linux --json
-          hca bench --dry-run --preset gb10-vllm --model dummy --json
-          hca init --preset generic-linux --model dummy --state-dir /tmp/hca-ci --json
-          hca up --no-dispatch --preset generic-linux --model dummy --state-dir /tmp/hca-ci --json
-          hca ps --preset generic-linux --state-dir /tmp/hca-ci
-          hca drain --state-dir /tmp/hca-ci
-          hca down --state-dir /tmp/hca-ci
-          tmux -L hca-linux kill-server || true
+          sudo apt-get update && sudo apt-get install -y tmux
+          python -m pip install -e ".[dev]"
+          python -m pip install -e ./_hermes
+      - name: Required private-API contract gate
+        env:
+          HCA_HERMES_SRC: ${{ github.workspace }}/_hermes
+        run: pytest -q tests/contract
+      - name: Required plugin/profile integration gate
+        env:
+          HCA_HERMES_SRC: ${{ github.workspace }}/_hermes
+        run: >-
+          pytest -q
+          tests/integration/test_plugin_enablement.py
+          tests/integration/test_profile_provisioning.py
+          tests/integration/test_cli_plugin_parity.py
+
+  latest-hermes-advisory:
+    name: Advisory Hermes main drift probe
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out current Hermes main
+        uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: main
+          path: _hermes-main
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install HCA and advisory Hermes
+        run: |
+          python -m pip install -e ".[dev]"
+          python -m pip install -e ./_hermes-main
+      - name: Visible advisory contract probe
+        env:
+          HCA_HERMES_SRC: ${{ github.workspace }}/_hermes-main
+        run: pytest -q tests/contract
+
+  package-wheel:
+    name: Clean wheel + CLI + Hermes plugin discovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build wheel and source distribution
+        run: |
+          python -m pip install build
+          python -m build
+      - name: Install only the wheel into a clean environment
+        run: |
+          python -m venv "$RUNNER_TEMP/hca-wheel"
+          "$RUNNER_TEMP/hca-wheel/bin/python" -m pip install dist/*.whl
+          "$RUNNER_TEMP/hca-wheel/bin/hca" version
+      - name: Verify package data and hermes_agent.plugins entry point
+        run: |
+          "$RUNNER_TEMP/hca-wheel/bin/python" - <<'PY'
+          from importlib.metadata import entry_points
+          from importlib.resources import files
+          eps = [ep for ep in entry_points(group="hermes_agent.plugins") if ep.name == "hca"]
+          assert len(eps) == 1, eps
+          module = eps[0].load()
+          assert callable(module.register)
+          root = files("hca")
+          assert root.joinpath("presets/generic-linux.toml").is_file()
+          assert root.joinpath("skills/hca-operations/SKILL.md").is_file()
+          assert not root.joinpath("presets/gb10-cluster-vllm.toml").is_file()
+          PY
+
+  generic-integration:
+    name: Generic Linux + deterministic fake endpoint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out pinned stable Hermes
+        uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ env.HERMES_STABLE_TAG }}
+          path: _hermes
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install tmux, HCA, and pinned Hermes
+        run: |
+          sudo apt-get update && sudo apt-get install -y tmux
+          python -m pip install -e ".[dev]"
+          python -m pip install -e ./_hermes
+      - name: Fake endpoint and deterministic goal-to-result integration
+        env:
+          HCA_HERMES_SRC: ${{ github.workspace }}/_hermes
+        run: |
+          pytest -q tests/integration/test_generic_fake_endpoint.py
+          python scripts/run-orchestration-acceptance.py
+
+  macos-portable:
+    name: macOS portable-control-plane smoke
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install portable dependencies
+        run: |
+          brew install tmux
+          python -m pip install -e ".[dev]"
+      - name: Portable smoke (no device-support claim)
+        run: >-
+          pytest -q
+          tests/unit/test_config.py
+          tests/unit/test_run_state.py
+          tests/unit/test_openai_compat.py
+          tests/unit/test_package_metadata.py
+          tests/integration/test_cluster_scope_guard.py

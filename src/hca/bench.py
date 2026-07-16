@@ -32,7 +32,7 @@ class LevelResult:
 @dataclass
 class BenchReport:
     engine: str
-    endpoint: str
+    endpoint_scope: str
     model: str
     levels: list[LevelResult] = field(default_factory=list)
     recommended_max_sequences: Optional[int] = None
@@ -75,7 +75,7 @@ def _chat_once(endpoint: str, model: str, timeout: float = 60.0) -> tuple[bool, 
         return True, dt, "ok"
     except Exception as exc:
         dt = time.perf_counter() - t0
-        return False, dt, str(exc)
+        return False, dt, oai.safe_error_detail(exc, endpoint)
 
 
 def _percentile(xs: list[float], p: float) -> float:
@@ -158,7 +158,7 @@ def run_bench(
 ) -> BenchReport:
     report = BenchReport(
         engine=engine or "openai_compat",
-        endpoint=endpoint,
+        endpoint_scope=oai.endpoint_scope(endpoint),
         model=model,
         dry_run=dry_run,
     )

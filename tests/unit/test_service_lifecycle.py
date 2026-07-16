@@ -269,6 +269,8 @@ def test_collect_manifest_has_sha_and_honest_outcome(tmp_path):
     assert manifest["outcome"] == "success"
     assert len(manifest["manifest_sha256"]) == 64
     assert manifest["state"] == "completed"
+    assert manifest["cleanup"] == {"hca_state_preserved": True}
+    assert str(tmp_path) not in str(manifest)
     # the manifest must link a real artifact/result, not only prose
     assert manifest["artifacts"]
 

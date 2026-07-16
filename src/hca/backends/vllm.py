@@ -43,7 +43,7 @@ def fetch_capacity(endpoint: str, metrics_url: str = "", timeout: float = 5.0) -
             last_err = ""
             break
         except Exception as exc:
-            last_err = str(exc)
+            last_err = oai.safe_error_detail(exc, url)
             continue
 
     if not metrics and last_err:
