@@ -1,0 +1,19 @@
+# Small team: one planner + one worker + one reviewer. For one-step or
+# lightly-decomposable goals. A one-step goal uses one execution worker after
+# planning — planning still happens.
+name = "small"
+description = "Minimal planner/worker/reviewer for small goals."
+review_policy = "auto"
+max_workers = 1
+
+[roles.planner]
+kind = "planner"
+count = 1
+
+[roles.worker]
+kind = "worker"
+count = 1
+
+[roles.reviewer]
+kind = "reviewer"
+count = 1

@@ -111,6 +111,81 @@ def cmd_doctor(args) -> int:
     return 0 if report.ok else 1
 
 
+def _service(args):
+    from hca.service import FleetService
+
+    return FleetService(_cfg_from_args(args))
+
+
+def _emit_service_result(res, as_json: bool) -> int:
+    if as_json:
+        _print(res.to_dict(), True)
+    else:
+        print(f"run: {res.run_id or '-'}  state: {res.state}  {res.message}")
+        if res.remediation:
+            print(f"  → {res.remediation}")
+    return res.code
+
+
+def cmd_run(args) -> int:
+    """One goal in → supervised concurrent team → one evidence-backed result."""
+    svc = _service(args)
+    res = svc.run(
+        args.goal,
+        project_root=getattr(args, "project", "") or "",
+        team=getattr(args, "team", "default") or "default",
+        concurrency=int(getattr(args, "concurrency", 1) or 1),
+        review_policy=getattr(args, "review", "auto") or "auto",
+        idempotency_key=getattr(args, "idempotency_key", "") or "",
+        resume=getattr(args, "resume", "") or "",
+    )
+    return _emit_service_result(res, args.json)
+
+
+def cmd_run_status(args) -> int:
+    svc = _service(args)
+    res = svc.status(getattr(args, "run_id", "") or "")
+    if args.json:
+        _print(res.to_dict(), True)
+        return res.code
+    if res.state == "list":
+        runs = res.data.get("runs", [])
+        if not runs:
+            print("(no runs)")
+        for r in runs:
+            print(f"{r['run_id']}  {r['state']:<11}  {r['goal'][:60]}")
+        return res.code
+    return _emit_service_result(res, False)
+
+
+def cmd_respond(args) -> int:
+    svc = _service(args)
+    res = svc.respond(args.run_id, args.question_id, args.response)
+    return _emit_service_result(res, args.json)
+
+
+def cmd_collect(args) -> int:
+    svc = _service(args)
+    res = svc.collect(args.run_id)
+    if args.json:
+        _print(res.to_dict(), True)
+        return res.code
+    manifest = res.data.get("result", {})
+    print(f"run {res.run_id}: {manifest.get('outcome', '?')} — {manifest.get('summary', '')}")
+    for b in manifest.get("unresolved_blockers", []):
+        print(f"  blocker: {b}")
+    for a in manifest.get("artifacts", []):
+        print(f"  artifact: {a.get('kind')}:{a.get('ref')}")
+    print(f"  manifest sha256: {manifest.get('manifest_sha256', '')[:16]}…")
+    return res.code
+
+
+def cmd_stop(args) -> int:
+    svc = _service(args)
+    res = svc.stop(args.run_id)
+    return _emit_service_result(res, args.json)
+
+
 def cmd_up(args) -> int:
     cfg = _cfg_from_args(args)
     if args.role:
@@ -721,6 +796,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp.add_parser("plan", parents=[common], help="Capacity dry-run estimate for this fleet")
 
+    # Goal-to-team product surface (single canonical path).
+    p_run = sp.add_parser(
+        "run", parents=[common], help="One goal in → supervised concurrent team → result"
+    )
+    p_run.add_argument("goal")
+    p_run.add_argument("--project", default="", help="project root path")
+    p_run.add_argument("--team", default="default", choices=["default", "small", "reviewed"])
+    p_run.add_argument("--concurrency", type=int, default=1)
+    p_run.add_argument("--review", default="auto", choices=["auto", "always", "never"])
+    p_run.add_argument("--idempotency-key", dest="idempotency_key", default="")
+    p_run.add_argument("--resume", default="", help="resume/inspect an existing run id")
+    p_run.add_argument("--detach", action="store_true", help="return the run id immediately")
+
+    p_rst = sp.add_parser("run-status", parents=[common], help="Run state (omit id to list)")
+    p_rst.add_argument("run_id", nargs="?", default="")
+
+    p_resp = sp.add_parser("respond", parents=[common], help="Answer a run's needs_input question")
+    p_resp.add_argument("run_id")
+    p_resp.add_argument("question_id")
+    p_resp.add_argument("response")
+
+    p_col = sp.add_parser("collect", parents=[common], help="Deterministic run result manifest")
+    p_col.add_argument("run_id")
+
+    p_stop = sp.add_parser("stop", parents=[common], help="Cancel a run (preserves partial work)")
+    p_stop.add_argument("run_id")
+
     p_task = sp.add_parser("task", parents=[common], help="Kanban task helpers")
     t_sp = p_task.add_subparsers(dest="task_cmd")
     p_add = t_sp.add_parser("add", parents=[common])
@@ -790,6 +892,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         "dashboard": cmd_dashboard,
         "plan": cmd_plan,
         "bench": cmd_bench,
+        "run": cmd_run,
+        "run-status": cmd_run_status,
+        "respond": cmd_respond,
+        "collect": cmd_collect,
+        "stop": cmd_stop,
     }
     if args.cmd == "cluster":
         if args.cluster_cmd == "doctor":

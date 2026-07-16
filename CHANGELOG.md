@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### Added
+- Goal-to-team product surface: `hca run/run-status/respond/collect/stop` and
+  the five Hermes plugin tools (`hca_team_run/status/collect/respond/stop`,
+  the last approval-gated) call one shared typed service (`hca.service`).
+  Immutable `RunSpec`, finite versioned `RunState` machine, structured
+  `Question`s, and a deterministic SHA-256'd `RunResult` manifest that never
+  reports cancelled/blocked work as success. Standardized exit codes
+  (0/2/3/4/5) and `remediation` on every result; idempotency keys (goal text
+  never deduplicates); honest `blocked` when no execution backend is admitted.
+  Bundled `hca-operations` skill and `default`/`small`/`reviewed` team
+  templates; `docs/running-a-team.md`.
 - Executable Hermes compatibility matrix: `hermes_compat` now probes the
   installed `hermes_cli` for the exact capability surface HCA needs
   (dispatch params, `DispatchResult`/`Task` fields, kanban/profile helpers),

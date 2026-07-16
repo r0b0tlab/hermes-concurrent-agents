@@ -39,6 +39,14 @@ def register(ctx: Any = None) -> None:
         ctx.register_hook("subagent_start", on_subagent_start)
         ctx.register_hook("subagent_stop", on_subagent_stop)
         ctx.register_hook("on_session_end", on_session_end)
+    # Register the five scoped team tools (no unrestricted passthrough).
+    if ctx is not None:
+        try:
+            from hca.plugin_tools import register_tools
+
+            register_tools(ctx)
+        except Exception:
+            pass
 
 
 def on_pre_tool_call(tool_name: str, args: dict, **kwargs) -> Optional[dict]:

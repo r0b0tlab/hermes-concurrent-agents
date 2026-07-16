@@ -1,0 +1,22 @@
+# Default HCA team: planner + worker pool + independent reviewer.
+# Concurrency happens inside the mission; the team expands only to admitted
+# useful concurrency, never to fill a quota.
+name = "default"
+description = "Planner, general worker pool, and an independent reviewer."
+review_policy = "auto"        # auto | always | never
+max_workers = 4
+
+[roles.planner]
+kind = "planner"
+count = 1
+description = "Decomposes and routes work; does not implement."
+
+[roles.worker]
+kind = "worker"
+count = 3
+description = "General Hermes workers on isolated profiles/worktrees."
+
+[roles.reviewer]
+kind = "reviewer"
+count = 1
+description = "Verifies acceptance criteria; did not implement the reviewed task."

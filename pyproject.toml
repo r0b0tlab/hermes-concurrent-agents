@@ -42,7 +42,12 @@ NVIDIAPlaybooks = "https://github.com/NVIDIA/dgx-spark-playbooks"
 where = ["src"]
 
 [tool.setuptools.package-data]
-hca = ["presets/*.toml", "templates/profiles/*/SOUL.md"]
+hca = [
+    "presets/*.toml",
+    "templates/profiles/*/SOUL.md",
+    "templates/teams/*.toml",
+    "skills/*/SKILL.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
