@@ -333,6 +333,45 @@ class StateDB:
         with self.connection() as conn:
             conn.execute("DELETE FROM leases WHERE lease_id=?", (lease_id,))
 
+    def release_lease_prefix(self, prefix: str) -> int:
+        """Release every lease whose id starts with ``prefix``.
+
+        Used to release a worker's durable lease by (board, task) regardless of
+        which run id it carried — exact release on terminal/crash/stop.
+        """
+        like = prefix.replace("%", r"\%").replace("_", r"\_") + "%"
+        with self.connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM leases WHERE lease_id LIKE ? ESCAPE '\\'", (like,)
+            )
+            return cur.rowcount
+
+    def list_leases(self, kind: Optional[str] = None) -> list[dict[str, Any]]:
+        now = time.time()
+        with self.connection() as conn:
+            conn.execute(
+                "DELETE FROM leases WHERE expires_at IS NOT NULL AND expires_at < ?",
+                (now,),
+            )
+            q = "SELECT * FROM leases"
+            args: list[Any] = []
+            if kind:
+                q += " WHERE kind=?"
+                args.append(kind)
+            rows = conn.execute(q, args).fetchall()
+        return [
+            {
+                "lease_id": r["lease_id"],
+                "kind": r["kind"],
+                "owner": r["owner"],
+                "credits": r["credits"],
+                "created_at": r["created_at"],
+                "expires_at": r["expires_at"],
+                "meta": json.loads(r["meta_json"] or "{}"),
+            }
+            for r in rows
+        ]
+
     def active_lease_credits(self, kind: Optional[str] = None) -> float:
         now = time.time()
         with self.connection() as conn:

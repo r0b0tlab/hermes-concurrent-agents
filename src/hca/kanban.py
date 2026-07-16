@@ -22,6 +22,7 @@ from hca.hermes_compat import (
     assert_sole_dispatcher,
     import_kanban_db,
 )
+from hca.leases import acquire_worker_lease
 from hca.logs import log_path
 from hca.observe import slot_name
 from hca.routing import Reservations, concrete_slots
@@ -203,6 +204,19 @@ def make_tmux_spawn_fn(
                 last_activity="spawned",
                 error=None,
             )
+        )
+        # Acquire the durable top-level lease bound to this exact worker so
+        # admission (hca.resources.admit) actually counts every launched worker
+        # against the sequence-credit ceiling — not just an in-memory
+        # reservation. Released on terminal/crash/stop by the orchestrator.
+        acquire_worker_lease(
+            state,
+            board=str(board),
+            task_id=str(task_id),
+            run_id=run_id,
+            slot=slot,
+            pid=pid,
+            node="local",
         )
         state.set_activity(
             kind="run.start",

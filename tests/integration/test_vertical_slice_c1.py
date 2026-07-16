@@ -201,6 +201,9 @@ def test_c1_vertical_slice_completes_with_real_evidence(
     assert manifest["artifacts"], "collect must link a real result/artifact"
     assert len(manifest["manifest_sha256"]) == 64
 
+    # every durable worker lease was released on terminal completion
+    assert state.active_lease_credits() == 0.0
+
 
 def test_c1_slice_blocks_when_worker_never_completes(
     monkeypatch, tmp_path, hermes_runtime
@@ -254,6 +257,8 @@ def test_c1_stop_terminates_owned_worker_and_reconciles(
     pid = rec.pid
     assert orch._wait_pid_gone(pid, 0.0) is False  # worker is alive
     assert orch._statuses([work_id])[work_id] == "running"
+    # a durable lease is held while the worker runs (governs admission)
+    assert state.active_lease_credits() >= 1.0
 
     try:
         res = svc.stop(spec.run_id)
@@ -263,5 +268,6 @@ def test_c1_stop_terminates_owned_worker_and_reconciles(
     assert res.state == "cancelled"
     assert orch._wait_pid_gone(pid, 3.0) is True  # process group terminated
     assert orch._statuses([work_id])[work_id] != "running"  # claim released
+    assert state.active_lease_credits() == 0.0  # lease released on stop
     col = svc.collect(spec.run_id)
     assert col.data["result"]["outcome"] == "cancelled"

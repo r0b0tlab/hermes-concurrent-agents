@@ -276,6 +276,10 @@ class KanbanOrchestrator:
                     reason=f"dispatch failed: {exc}",
                 )
             statuses = self._statuses(child_ids)
+            # Release the durable lease of any task that is no longer running
+            # (terminal, or reclaimed after a worker crash) so admission frees
+            # its credit exactly once.
+            self._reconcile_leases(child_ids, statuses)
             if statuses and all(
                 s in TERMINAL_TASK_STATUSES for s in statuses.values()
             ):
@@ -283,9 +287,24 @@ class KanbanOrchestrator:
             time.sleep(self.poll_interval)
 
         self._maybe_close_root(root_id, child_ids, store, spec.run_id)
+        # Final sweep: every non-running task releases its lease.
+        self._reconcile_leases(child_ids, self._statuses(child_ids))
         return self._build_evidence(
             spec, root_id, child_ids, node_kinds, reviewer_profile
         )
+
+    def _reconcile_leases(self, child_ids: list[str], statuses: dict[str, str]) -> None:
+        """Release the durable lease of any task not currently ``running``.
+
+        Covers terminal completion, a reclaimed crash (task bounced back to
+        ready), block, and timeout — the lease is freed exactly once so a
+        launched worker consumes a credit only while it is actually running.
+        """
+        from hca.leases import release_worker_lease
+
+        for tid, status in statuses.items():
+            if status != "running":
+                release_worker_lease(self.state, board=self.board, task_id=tid)
 
     def _dispatch_tick(self, wave: int) -> None:
         from hca.kanban import dispatch_tick
@@ -482,6 +501,13 @@ class KanbanOrchestrator:
             conn.commit()
         finally:
             conn.close()
+
+        # Release every durable lease this run held so admission frees the
+        # credits on stop.
+        from hca.leases import release_worker_lease
+
+        for tid in child_ids + ([root_id] if root_id else []):
+            release_worker_lease(self.state, board=board, task_id=tid)
 
         store.append_event(
             spec.run_id, "run.cancel",
