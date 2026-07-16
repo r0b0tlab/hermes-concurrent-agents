@@ -1,5 +1,5 @@
 from hca.devices.base import DeviceSignals
-from hca.models import Engine, FleetConfig, BackendConfig, CapacityConfig
+from hca.models import BackendConfig, CapacityConfig, CapacitySnapshot, Engine, FleetConfig
 from hca.resources import admit, estimate_task_credits
 from hca.state import StateDB
 
@@ -26,7 +26,7 @@ def test_device_memory_hysteresis(tmp_path):
     assert not d.allowed and "memory pressure" in d.reason
     # still above low → stays blocked (hysteresis, no flapping)
     d = admit(cfg, db, device_signals=mid)
-    assert not d.allowed and "gate open below" in d.reason
+    assert not d.allowed and "low watermark" in d.reason
     # drops below low → gate reopens (device no longer blocks; backend may)
     d = admit(cfg, db, device_signals=low)
     assert "memory pressure" not in d.reason
@@ -64,3 +64,65 @@ def test_admit_respects_top_level_cap(tmp_path):
     d = admit(cfg, db, running_top_level=0)
     # endpoint 9 is unhealthy → not allowed
     assert d.allowed is False
+
+
+def test_core_admission_does_not_probe_profile_owned_endpoint(tmp_path, monkeypatch):
+    db = StateDB(tmp_path / "s.sqlite")
+    cfg = _healthy_cfg()
+    sig = DeviceSignals(adapter="test", mem_pressure=None, disk_pressure=None)
+
+    def forbidden_probe(_cfg):
+        raise AssertionError("core admission must not probe a profile-owned endpoint")
+
+    monkeypatch.setattr("hca.resources.fetch_capacity", forbidden_probe)
+    d = admit(cfg, db, device_signals=sig)
+    assert d.allowed is True
+    assert d.capacity is None
+
+
+def test_optional_unhealthy_capacity_snapshot_blocks(tmp_path):
+    db = StateDB(tmp_path / "s.sqlite")
+    cfg = _healthy_cfg()
+    sig = DeviceSignals(adapter="test", mem_pressure=None, disk_pressure=None)
+    capacity = CapacitySnapshot(engine="openai_compat", healthy=False, detail="down")
+    d = admit(cfg, db, device_signals=sig, capacity=capacity)
+    assert d.allowed is False
+    assert "backend unhealthy" in d.reason
+
+
+def test_memory_pressure_hysteresis_requires_low_watermark_to_reopen(tmp_path):
+    db = StateDB(tmp_path / "s.sqlite")
+    cfg = _healthy_cfg()
+
+    high = admit(
+        cfg,
+        db,
+        device_signals=DeviceSignals(
+            adapter="test", mem_pressure=cfg.capacity.memory_high + 0.01
+        ),
+    )
+    assert high.allowed is False
+    between_pressure = (
+        cfg.capacity.memory_high + cfg.capacity.memory_low
+    ) / 2
+    between = admit(
+        cfg,
+        db,
+        device_signals=DeviceSignals(adapter="test", mem_pressure=between_pressure),
+    )
+    assert between.allowed is False
+    assert "low watermark" in between.reason
+    unknown = admit(
+        cfg,
+        db,
+        device_signals=DeviceSignals(adapter="test", mem_pressure=None),
+    )
+    assert unknown.allowed is False
+    low = admit(
+        cfg,
+        db,
+        device_signals=DeviceSignals(
+            adapter="test", mem_pressure=cfg.capacity.memory_low - 0.01
+        ),
+    )
+    assert low.allowed is True

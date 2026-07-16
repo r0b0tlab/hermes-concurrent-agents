@@ -5,6 +5,7 @@ produce equivalent state transitions and semantically equal result schemas.
 from __future__ import annotations
 
 from hca.config import load_fleet_config
+from hca.plugin import on_pre_tool_call
 from hca.plugin_schemas import TEAM_TOOL_NAMES, all_tool_schemas
 from hca.plugin_tools import (
     hca_team_collect,
@@ -15,7 +16,7 @@ from hca.plugin_tools import (
 )
 from hca.evidence import ExecutionEvidence, TaskEvidence
 from hca.run import RunState
-from hca.service import FleetService
+from hca.service import FleetService, ServiceResult
 
 
 def _done_evidence() -> ExecutionEvidence:
@@ -109,8 +110,8 @@ def test_stop_tool_preserves_cancel_semantics(tmp_path):
 
 
 def test_stop_tool_requires_explicit_authorization(tmp_path):
-    # Hermes does not enforce the schema `approval` flag, so HCA gates the stop
-    # in code: without authorization=run_id the run is NOT cancelled.
+    # The handler gate is retained after Hermes' real pre-tool human approval:
+    # without authorization=run_id the run is NOT cancelled.
     svc = _svc(tmp_path, NeedsInput())
     started = hca_team_run("goal", service=svc)
     rid = started["run_id"]
@@ -123,6 +124,19 @@ def test_stop_tool_requires_explicit_authorization(tmp_path):
     assert not hca_team_stop(rid, authorization="nope", service=svc)["ok"]
     # correct authorization cancels
     assert hca_team_stop(rid, authorization=rid, service=svc)["state"] == "cancelled"
+
+
+def test_stop_hook_requests_real_hermes_approval_directive():
+    directive = on_pre_tool_call(
+        "hca_team_stop",
+        {"run_id": "run-123", "authorization": "run-123"},
+    )
+    assert directive == {
+        "action": "approve",
+        "message": "Cancel HCA run run-123 and terminate its owned workers?",
+        "rule_key": "hca_team_stop:run-123",
+    }
+    assert on_pre_tool_call("hca_team_stop", {})["action"] == "block"
 
 
 def test_status_tool_lists_and_targets(tmp_path):
@@ -147,3 +161,48 @@ def test_idempotency_key_parity(tmp_path):
     a = hca_team_run("g", idempotency_key="stable-1", service=svc)
     b = hca_team_run("g", idempotency_key="stable-1", service=svc)
     assert a["run_id"] == b["run_id"]  # agent-safe retry
+
+
+def test_run_tool_forwards_the_full_shared_contract():
+    class RecordingService(FleetService):
+        def __init__(self):
+            self.kwargs = {}
+
+        def run(self, goal, **kwargs):
+            self.goal = goal
+            self.kwargs = kwargs
+            return ServiceResult(True, 0, "run", "r1", "running", "ok")
+
+    svc = RecordingService()
+    result = hca_team_run(
+        "ship it",
+        project="/tmp/project",
+        team="reviewed",
+        concurrency=2,
+        review_policy="always",
+        constraints=["offline"],
+        acceptance_criteria=["tests pass"],
+        source_profiles=["default"],
+        budgets={"max_tasks": 3, "wall_seconds": 60},
+        idempotency_key="stable",
+        detach=True,
+        service=svc,
+    )
+    assert result["run_id"] == "r1"
+    assert svc.goal == "ship it"
+    assert svc.kwargs == {
+        "project_root": "/tmp/project",
+        "constraints": ["offline"],
+        "acceptance_criteria": ["tests pass"],
+        "source_profiles": ["default"],
+        "team": "reviewed",
+        "concurrency": 2,
+        "review_policy": "always",
+        "budgets": {"max_tasks": 3, "wall_seconds": 60},
+        "idempotency_key": "stable",
+        "detach": True,
+    }
+    run_properties = {
+        s["name"]: s for s in all_tool_schemas()
+    }["hca_team_run"]["parameters"]["properties"]
+    assert set(svc.kwargs) - {"project_root"} <= set(run_properties)

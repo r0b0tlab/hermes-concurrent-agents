@@ -55,6 +55,10 @@ class TaskEvidence:
     artifacts: list[Artifact] = field(default_factory=list)
     is_review: bool = False
     reviewed_by: str = ""
+    review_verdict: str = ""  # accept | reject | malformed | ""
+    block_kind: str = ""
+    block_reason: str = ""
+    kind: str = ""  # work | rework | review | final | verification
     is_root: bool = False
 
     def to_dict(self) -> dict:
@@ -68,6 +72,10 @@ class TaskEvidence:
             "artifacts": [a.to_dict() for a in self.artifacts],
             "is_review": self.is_review,
             "reviewed_by": self.reviewed_by,
+            "review_verdict": self.review_verdict,
+            "block_kind": self.block_kind,
+            "block_reason": self.block_reason,
+            "kind": self.kind,
             "is_root": self.is_root,
         }
 
@@ -132,16 +140,6 @@ def derive_final_state(
             ev.reason or "no upstream Kanban tasks were created for this run"
         )
 
-    non_terminal = [
-        t for t in ev.tasks if t.terminal_status not in TERMINAL_TASK_STATUSES
-    ]
-    if non_terminal:
-        ids = ", ".join(t.task_id for t in non_terminal[:5])
-        return RunState.BLOCKED, (
-            ev.reason
-            or f"{len(non_terminal)} task(s) still in flight ({ids}) — not terminal"
-        )
-
     fatal = [t for t in ev.tasks if t.terminal_status in FATAL_TASK_STATUSES]
     if fatal:
         t = fatal[0]
@@ -150,11 +148,44 @@ def derive_final_state(
             f"{t.terminal_status}"
         )
 
-    blocked = [t for t in ev.tasks if t.terminal_status == "blocked"]
+    needs_input = [
+        t for t in ev.tasks
+        if t.terminal_status == "blocked" and t.block_kind == "needs_input"
+    ]
+    if needs_input:
+        t = needs_input[0]
+        return RunState.NEEDS_INPUT, (
+            t.block_reason
+            or f"task {t.task_id} needs operator input before it can continue"
+        )
+
+    blocked = [
+        t
+        for t in ev.tasks
+        if t.terminal_status == "blocked"
+        and not (t.kind == "gate" and t.block_kind == "hca_review_gate")
+    ]
     if blocked:
         t = blocked[0]
         return RunState.BLOCKED, (
             ev.reason or f"{len(blocked)} task(s) blocked; {t.task_id} needs attention"
+        )
+
+    non_terminal = [
+        t for t in ev.tasks if t.terminal_status not in TERMINAL_TASK_STATUSES
+    ]
+    if non_terminal:
+        ids = ", ".join(t.task_id for t in non_terminal[:5])
+        if ev.reason:
+            # A bounded synchronous execution attempt exhausted its observation
+            # window. This requires attention/supervision rather than a false
+            # success, so hold it blocked with the explicit budget reason.
+            return RunState.BLOCKED, ev.reason
+        # A status/collect projection can observe healthy work in flight. That
+        # is RUNNING, not BLOCKED; otherwise merely checking a detached run would
+        # corrupt its projection into a terminal-looking failure state.
+        return RunState.RUNNING, (
+            f"{len(non_terminal)} task(s) still in flight ({ids}) — not terminal"
         )
 
     # Everything terminal and nothing fatal/blocked ⇒ all done/archived.
@@ -190,11 +221,32 @@ def derive_final_state(
                 "review required for this run but no independent reviewer "
                 "accepted the work"
             )
-        implementers = {t.assignee for t in work if t.assignee}
-        independent = [
-            r for r in reviews_done if r.reviewed_by and r.reviewed_by not in implementers
-        ]
-        if not independent:
+        latest_review = reviews_done[-1]
+        if latest_review.run_id is None or latest_review.pid is None:
+            return RunState.BLOCKED, (
+                f"review {latest_review.task_id} is 'done' but no run id + worker "
+                "pid were observed — refusing unexecuted review acceptance"
+            )
+        if not (latest_review.result or latest_review.artifacts):
+            return RunState.BLOCKED, (
+                f"review {latest_review.task_id} produced no verdict artifact/result"
+            )
+        if latest_review.review_verdict == "reject":
+            return RunState.BLOCKED, (
+                f"review {latest_review.task_id} rejected the work; bounded "
+                "rework is required before completion"
+            )
+        if latest_review.review_verdict != "accept":
+            return RunState.BLOCKED, (
+                "review task completed without a structured HCA_REVIEW: ACCEPT "
+                "verdict — refusing ambiguous acceptance"
+            )
+        implementers = {
+            t.assignee
+            for t in work
+            if t.assignee and (t.kind in {"work", "rework"} or (not t.kind and not t.is_root))
+        }
+        if latest_review.reviewed_by in implementers or not latest_review.reviewed_by:
             return RunState.BLOCKED, (
                 "reviewer is not independent of the implementer — self-review "
                 "cannot accept a run"

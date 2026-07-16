@@ -136,8 +136,10 @@ class FleetService:
         *,
         orchestrator: Optional[Orchestrator] = None,
         store: Optional[RunStore] = None,
+        launch_controller: bool = True,
     ):
         self.cfg = cfg
+        self._controller_enabled = bool(launch_controller and orchestrator is None)
         state_dir = Path(cfg.state_dir or "~/.hca").expanduser()
         state_dir.mkdir(parents=True, exist_ok=True)
         self.store = store or RunStore(state_dir / "hca.sqlite")
@@ -159,6 +161,7 @@ class FleetService:
         budgets: Optional[dict] = None,
         idempotency_key: str = "",
         resume: str = "",
+        detach: bool = False,
     ) -> ServiceResult:
         # Resume an existing run by id.
         if resume:
@@ -193,6 +196,28 @@ class FleetService:
                 "concurrency must be >= 1",
             )
 
+        raw_budgets = dict(budgets or {})
+        known_budgets = set(RunBudgets().to_dict())
+        unknown_budgets = sorted(set(raw_budgets) - known_budgets)
+        if unknown_budgets:
+            return ServiceResult(
+                False,
+                EXIT_INVALID,
+                "run",
+                "",
+                "invalid",
+                f"unknown budget key(s): {', '.join(unknown_budgets)}",
+                f"known budgets: {', '.join(sorted(known_budgets))}",
+            )
+        try:
+            parsed_budgets = RunBudgets.from_dict(raw_budgets)
+            if any(int(v) < 0 for v in parsed_budgets.to_dict().values()):
+                raise ValueError("budgets must be non-negative")
+        except (TypeError, ValueError) as exc:
+            return ServiceResult(
+                False, EXIT_INVALID, "run", "", "invalid", f"invalid budgets: {exc}"
+            )
+
         # Validate the team against the bundled templates (both surfaces).
         from hca.team import TeamError, select_team
 
@@ -202,6 +227,24 @@ class FleetService:
             return ServiceResult(
                 False, EXIT_INVALID, "run", "", "invalid", str(exc),
                 "choose a known --team (default | small | reviewed)",
+            )
+        concurrency_limit = max(
+            1,
+            min(
+                int(team_spec.max_workers),
+                int(parsed_budgets.max_workers),
+                int(self.cfg.capacity.max_wave_size),
+            ),
+        )
+        if concurrency > concurrency_limit:
+            return ServiceResult(
+                False,
+                EXIT_INVALID,
+                "run",
+                "",
+                "invalid",
+                f"concurrency {concurrency} exceeds admitted team/run limit {concurrency_limit}",
+                "lower --concurrency or select/configure a larger bounded team",
             )
 
         spec = RunSpec(
@@ -214,7 +257,7 @@ class FleetService:
             team=team,
             concurrency=int(concurrency),
             review_policy=review_policy,
-            budgets=RunBudgets.from_dict(budgets),
+            budgets=parsed_budgets,
             idempotency_key=idempotency_key,
             board=self.cfg.board,
             created_at=time.time(),
@@ -241,8 +284,34 @@ class FleetService:
                     reason=proj_now.reason or "planner produced no dispatchable graph",
                 )
             else:
-                evidence = self.orchestrator.execute(spec, self.store)
-                self._reconcile_from_evidence(spec, evidence)
+                if detach:
+                    start = getattr(self.orchestrator, "start", None)
+                    if not callable(start):
+                        self.store.set_state(
+                            spec.run_id,
+                            RunState.BLOCKED,
+                            reason=(
+                                "selected execution backend cannot detach safely; "
+                                "run without --detach or configure the Kanban backend"
+                            ),
+                        )
+                    else:
+                        self.store.set_state(
+                            spec.run_id,
+                            RunState.RUNNING,
+                            reason="detached after initial admitted dispatch wave",
+                        )
+                        start(spec, self.store)
+                        self.store.append_event(
+                            spec.run_id,
+                            "run.detached",
+                            "detached controller requested",
+                        )
+                        if self._controller_enabled:
+                            self._ensure_controller(spec.run_id, fail_closed=True)
+                else:
+                    evidence = self.orchestrator.execute(spec, self.store)
+                    self._reconcile_from_evidence(spec, evidence)
         except RunStateError as exc:
             self.store.set_state(spec.run_id, RunState.FAILED, reason=str(exc))
         except Exception as exc:  # pragma: no cover - defensive
@@ -282,6 +351,10 @@ class FleetService:
             self._safe_set(spec.run_id, RunState.COMPLETED, reason)
         elif final == RunState.FAILED:
             self._safe_set(spec.run_id, RunState.FAILED, reason)
+        elif final == RunState.RUNNING:
+            self._safe_set(spec.run_id, RunState.RUNNING, reason)
+        elif final == RunState.NEEDS_INPUT:
+            self._safe_set(spec.run_id, RunState.NEEDS_INPUT, reason)
         else:
             self._safe_set(spec.run_id, RunState.BLOCKED, reason)
 
@@ -292,6 +365,46 @@ class FleetService:
             return
         if can_transition(proj.state, target):
             self.store.set_state(run_id, target, reason=reason)
+
+    def reconcile(self, run_id: str, *, dispatch: bool = True) -> ServiceResult:
+        """Run one durable controller iteration for a non-terminal run."""
+        proj = self.store.get_run(run_id)
+        if proj is None:
+            return ServiceResult(
+                False, EXIT_INVALID, "reconcile", run_id, "unknown",
+                f"unknown run {run_id}",
+            )
+        if proj.state in (RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED):
+            return self._status_result("reconcile", proj)
+        spec = self.store.get_spec(run_id)
+        tick = getattr(self.orchestrator, "tick", None)
+        if spec is None or not callable(tick):
+            proj = self._reconcile_projection(run_id) or proj
+            return self._status_result("reconcile", proj)
+        try:
+            evidence = tick(spec, self.store, dispatch=dispatch)
+            if not isinstance(evidence, ExecutionEvidence):
+                raise TypeError("controller tick returned invalid evidence")
+            self._reconcile_from_evidence(spec, evidence)
+        except Exception as exc:
+            self.store.append_event(
+                run_id,
+                "run.controller_error",
+                "controller iteration failed",
+                {"error_type": type(exc).__name__},
+            )
+            proj = self.store.get_run(run_id) or proj
+            return ServiceResult(
+                False,
+                EXIT_RUNTIME,
+                "reconcile",
+                run_id,
+                proj.state.value,
+                f"controller iteration failed: {type(exc).__name__}",
+                "inspect controller logs and retry status/reconcile",
+            )
+        refreshed = self.store.get_run(run_id)
+        return self._status_result("reconcile", refreshed or proj)
 
     def _reconcile_projection(self, run_id: str) -> Optional[RunProjection]:
         """Refresh a non-terminal run from live upstream Kanban truth.
@@ -307,14 +420,23 @@ class FleetService:
         ):
             return proj
         project = getattr(self.orchestrator, "project", None)
+        tick = getattr(self.orchestrator, "tick", None)
         spec = self.store.get_spec(run_id)
-        if spec is None or not callable(project):
+        if spec is None or (not callable(project) and not callable(tick)):
             return proj
         try:
-            evidence = project(spec, self.store)
+            if callable(tick):
+                evidence = tick(spec, self.store, dispatch=False)
+            else:
+                sync_questions = getattr(self.orchestrator, "sync_questions", None)
+                if callable(sync_questions):
+                    sync_questions(spec, self.store)
+                if not callable(project):
+                    return proj
+                evidence = project(spec, self.store)
         except Exception:  # pragma: no cover - defensive; never fail status
             return proj
-        if evidence is None:
+        if not isinstance(evidence, ExecutionEvidence):
             return proj
         self._reconcile_from_evidence(spec, evidence)
         return self.store.get_run(run_id)
@@ -353,6 +475,59 @@ class FleetService:
                 )
         return out
 
+    def _detached_requested(self, run_id: str) -> bool:
+        return any(
+            event["kind"] == "run.detached"
+            for event in self.store.list_events(run_id)
+        )
+
+    def _ensure_controller(self, run_id: str, *, fail_closed: bool = False) -> bool:
+        if not self._controller_enabled or not self._detached_requested(run_id):
+            return False
+        proj = self.store.get_run(run_id)
+        if proj is None or proj.state in (
+            RunState.COMPLETED,
+            RunState.FAILED,
+            RunState.CANCELLED,
+            RunState.NEEDS_INPUT,
+            RunState.STOPPING,
+        ):
+            return False
+        try:
+            from hca.controller import controller_alive, launch_controller
+
+            was_alive = controller_alive(self.cfg.state_dir, run_id)
+            pid = launch_controller(self.cfg, run_id)
+            if not was_alive:
+                self.store.append_event(
+                    run_id,
+                    "run.controller_ready",
+                    "detached controller is live",
+                    {"pid": pid},
+                )
+            return True
+        except Exception as exc:
+            self.store.append_event(
+                run_id,
+                "run.controller_launch_failed",
+                "detached controller failed to start",
+                {"error_type": type(exc).__name__},
+            )
+            if fail_closed:
+                spec = self.store.get_spec(run_id)
+                cancel = getattr(self.orchestrator, "cancel", None)
+                if spec is not None and callable(cancel):
+                    try:
+                        cancel(spec, self.store)
+                    except Exception:
+                        pass
+                self._safe_set(
+                    run_id,
+                    RunState.BLOCKED,
+                    "detached controller failed to start; admitted workers were stopped",
+                )
+            return False
+
     # --- status ---
 
     def status(self, run_id: str = "") -> ServiceResult:
@@ -371,6 +546,8 @@ class FleetService:
             )
         # Reconcile the projection from live upstream Kanban truth.
         proj = self._reconcile_projection(run_id) or proj
+        self._ensure_controller(run_id)
+        proj = self.store.get_run(run_id) or proj
         return self._status_result("status", proj)
 
     # --- respond ---
@@ -382,8 +559,61 @@ class FleetService:
                 False, EXIT_INVALID, "respond", run_id, "unknown",
                 f"unknown run {run_id}",
             )
+        if not answer or not answer.strip():
+            return ServiceResult(
+                False,
+                EXIT_INVALID,
+                "respond",
+                run_id,
+                proj.state.value,
+                "answer must be non-empty",
+            )
+        question = self.store.get_question(question_id)
+        if question is None or question.run_id != run_id or question.status != "open":
+            detail = (
+                f"unknown question {question_id}"
+                if question is None
+                else (
+                    f"question {question_id} belongs to run {question.run_id}, not {run_id}"
+                    if question.run_id != run_id
+                    else f"question {question_id} already answered"
+                )
+            )
+            return ServiceResult(
+                False, EXIT_INVALID, "respond", run_id, proj.state.value, detail,
+                "check the run id + question id with `hca status <run>`",
+            )
+
+        spec = self.store.get_spec(run_id)
+        backend_respond = getattr(self.orchestrator, "respond", None)
+        if question.task_id and callable(backend_respond) and spec is not None:
+            try:
+                released = backend_respond(
+                    spec, question.task_id, answer.strip()
+                )
+                if not released:
+                    return ServiceResult(
+                        False,
+                        EXIT_BLOCKED,
+                        "respond",
+                        run_id,
+                        proj.state.value,
+                        f"task gate for {question_id} is no longer unblockable",
+                        "refresh status; do not replay a stale answer",
+                    )
+            except (ValueError, RuntimeError) as exc:
+                return ServiceResult(
+                    False,
+                    EXIT_BLOCKED,
+                    "respond",
+                    run_id,
+                    proj.state.value,
+                    f"could not release matching task gate: {exc}",
+                    "refresh status and verify the task still belongs to this run",
+                )
+
         try:
-            self.store.answer_question(run_id, question_id, answer)
+            self.store.answer_question(run_id, question_id, answer.strip())
         except RunStateError as exc:
             return ServiceResult(
                 False, EXIT_INVALID, "respond", run_id, proj.state.value, str(exc),
@@ -392,6 +622,10 @@ class FleetService:
         # Resume the blocked branch if no more open questions.
         if proj.state == RunState.NEEDS_INPUT and not self.store.open_questions(run_id):
             self.store.set_state(run_id, RunState.RUNNING, reason="resumed after input")
+        reconciled = self.reconcile(run_id, dispatch=True)
+        if reconciled.code == EXIT_RUNTIME:
+            return reconciled
+        self._ensure_controller(run_id, fail_closed=True)
         proj = self.store.get_run(run_id)
         return self._status_result("respond", proj, message=f"recorded answer to {question_id}")
 
@@ -442,14 +676,46 @@ class FleetService:
         # turn a stop into a completion. Partial work/evidence is preserved.
         reason = "cancelled by operator"
         try:
+            # Persist STOPPING first. Concurrent status/respond calls now see a
+            # dispatch barrier and cannot relaunch a controller during stop.
             self.store.set_state(run_id, RunState.STOPPING, reason="stop requested")
+            if self._controller_enabled and self._detached_requested(run_id):
+                try:
+                    from hca.controller import stop_controller
+
+                    stop_controller(self.cfg.state_dir, run_id)
+                except Exception as exc:
+                    self.store.append_event(
+                        run_id,
+                        "controller.stop_error",
+                        "controller stop signal failed; persisted STOPPING remains authoritative",
+                        {"error": str(exc)[:500]},
+                    )
             cancel = getattr(self.orchestrator, "cancel", None)
             spec = self.store.get_spec(run_id)
             if callable(cancel) and spec is not None:
                 try:
-                    reason = cancel(spec, self.store) or reason
-                except Exception as exc:  # never let a cancel error strand the run
-                    reason = f"cancelled (cancellation seam error: {exc})"
+                    cancel_reason = cancel(spec, self.store)
+                    if isinstance(cancel_reason, str) and cancel_reason:
+                        reason = cancel_reason
+                except Exception as exc:
+                    blocked_reason = f"cancellation incomplete: {exc}"
+                    self.store.append_event(
+                        run_id,
+                        "run.cancel_incomplete",
+                        blocked_reason,
+                    )
+                    self.store.set_state(
+                        run_id, RunState.BLOCKED, reason=blocked_reason
+                    )
+                    blocked = self.store.get_run(run_id)
+                    if blocked is None:  # pragma: no cover - invariant guard
+                        raise RunStateError(f"run {run_id} disappeared during stop")
+                    return self._status_result(
+                        "stop",
+                        blocked,
+                        message="run blocked because exact cancellation did not finish",
+                    )
             self.store.set_state(run_id, RunState.CANCELLED, reason=reason)
         except RunStateError as exc:
             return ServiceResult(

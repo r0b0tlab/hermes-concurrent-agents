@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
@@ -22,9 +23,11 @@ from hca.hermes_compat import (
     assert_sole_dispatcher,
     import_kanban_db,
 )
-from hca.leases import acquire_worker_lease
+from hca.leases import acquire_worker_lease, release_worker_lease
 from hca.logs import log_path
 from hca.observe import slot_name
+from hca.process_identity import proc_start_ticks
+from hca.resources import admit
 from hca.routing import Reservations, concrete_slots
 from hca.state import RunRecord, StateDB
 from hca.tmux import TmuxManager, sanitize_session_name
@@ -108,15 +111,115 @@ def pre_reserve_ready(
     except sqlite3.Error:
         return reserved
     busy = reservations.busy(state)
+    active_runs = state.list_runs(status="running")
+    running = len(active_runs)
+    role_counts = Counter(_role_from_profile(run.slot) for run in active_runs)
+    reserved_roles: Counter[str] = Counter()
     for row in rows:
         if len(reserved) >= limit:
             break
         assignee = (row["assignee"] or "") if isinstance(row, sqlite3.Row) else ""
-        if assignee in concrete and assignee not in busy:
-            reservations.reserve(assignee)
-            busy.add(assignee)
-            reserved.append(assignee)
+        if assignee not in concrete:
+            continue
+        if assignee in busy:
+            state.set_activity(
+                kind="admission.wait",
+                message=f"waiting: concrete profile {assignee} already has an active worker",
+                board=cfg.board,
+                task_id=str(row["id"]),
+                slot=assignee,
+            )
+            continue
+        role = _role_from_profile(assignee)
+        role_cap = cfg.capacity.per_role_caps.get(role)
+        if role_cap is not None and role_counts[role] + reserved_roles[role] >= role_cap:
+            state.set_activity(
+                kind="admission.wait",
+                message=f"waiting: role {role} cap {role_cap} reached",
+                board=cfg.board,
+                task_id=str(row["id"]),
+                slot=assignee,
+            )
+            continue
+        decision = admit(
+            cfg,
+            state,
+            credits=1.0 + len(reserved),
+            running_top_level=running + len(reserved),
+        )
+        if not decision.allowed:
+            state.set_activity(
+                kind="admission.wait",
+                message=decision.reason,
+                board=cfg.board,
+                task_id=str(row["id"]),
+                slot=assignee,
+            )
+            break
+        reservations.reserve(assignee)
+        busy.add(assignee)
+        reserved.append(assignee)
+        reserved_roles[role] += 1
     return reserved
+
+
+def _reconcile_owned_worker_identities(
+    kb: Any, conn: sqlite3.Connection, cfg: FleetConfig, state: StateDB
+) -> list[str]:
+    """Reclaim dead or PID-reused exact workers before admission and claim."""
+
+    reclaimed: list[str] = []
+
+    def already_gone(_pid: int, _signal: int) -> None:
+        # Upstream's reclaim API needs a signal seam. Identity mismatch proves
+        # the recorded worker is gone, so never signal the process now at PID.
+        raise ProcessLookupError
+
+    for rec in state.list_runs(status="running"):
+        if rec.board != cfg.board:
+            continue
+        current_ticks = proc_start_ticks(rec.pid) if rec.pid else None
+        if rec.pid_start_ticks is None and current_ticks is not None:
+            state.set_activity(
+                kind="worker.quarantined",
+                message=(
+                    f"worker {rec.run_id} pid={rec.pid} has no recorded start "
+                    "identity; refusing to signal or replace it"
+                ),
+                board=rec.board,
+                task_id=rec.task_id,
+                run_id=rec.run_id,
+                slot=rec.slot,
+            )
+            continue
+        if rec.pid_start_ticks is not None and current_ticks == rec.pid_start_ticks:
+            continue
+        did_reclaim = kb.reclaim_task(
+            conn,
+            rec.task_id,
+            reason="HCA owned worker process identity no longer exists",
+            signal_fn=already_gone,
+        )
+        if not did_reclaim:
+            continue
+        state.mark_run_status(
+            rec.board,
+            rec.run_id,
+            "crashed",
+            error="owned worker process identity no longer exists",
+        )
+        release_worker_lease(state, board=rec.board, task_id=rec.task_id)
+        state.release_leases_by_owner(rec.task_id, kind="subagent")
+        state.set_activity(
+            kind="run.crashed",
+            message=f"reclaimed dead worker {rec.run_id} pid={rec.pid}",
+            board=rec.board,
+            task_id=rec.task_id,
+            run_id=rec.run_id,
+            slot=rec.slot,
+        )
+        reclaimed.append(rec.task_id)
+    return reclaimed
 
 
 def make_tmux_spawn_fn(
@@ -184,6 +287,23 @@ def make_tmux_spawn_fn(
             raise WorkerLaunchError(
                 f"tmux returned no pid for task {task_id} on slot {slot}"
             )
+        pid_start_ticks = None
+        deadline = time.monotonic() + 0.5
+        while pid_start_ticks is None and time.monotonic() < deadline:
+            pid_start_ticks = proc_start_ticks(pid)
+            if pid_start_ticks is None:
+                time.sleep(0.01)
+        if pid_start_ticks is None:
+            # The named tmux slot is HCA-owned; terminate it rather than leave
+            # an untracked process after the upstream claim has been created.
+            try:
+                tmux.kill_session(slot)
+            except Exception:
+                pass
+            raise WorkerLaunchError(
+                f"could not capture exact process identity for pid {pid} "
+                f"task {task_id} on slot {slot}"
+            )
 
         now = time.time()
         session_id = getattr(task, "session_id", None)
@@ -203,6 +323,7 @@ def make_tmux_spawn_fn(
                 updated_at=now,
                 last_activity="spawned",
                 error=None,
+                pid_start_ticks=pid_start_ticks,
             )
         )
         # Acquire the durable top-level lease bound to this exact worker so
@@ -216,6 +337,7 @@ def make_tmux_spawn_fn(
             run_id=run_id,
             slot=slot,
             pid=pid,
+            pid_start_ticks=pid_start_ticks,
             node="local",
         )
         state.set_activity(
@@ -268,6 +390,7 @@ def dispatch_tick(
     conn = _open_kanban_conn(cfg.board)
     try:
         wave = int(kwargs.get("max_spawn", cfg.capacity.max_wave_size))
+        pre_crashed = _reconcile_owned_worker_identities(kb, conn, cfg, state)
         reservations = Reservations()
         # dispatch_once promotes todo/blocked → ready *internally*; run the
         # same idempotent promotion first so HCA can see and pre-reserve the
@@ -280,14 +403,22 @@ def dispatch_tick(
                 pass
         pre_reserve_ready(cfg, state, conn, reservations, limit=wave)
         spawn_fn = make_tmux_spawn_fn(cfg, state, tmux, reservations)
+        configured_cap = int(
+            kwargs.get("max_in_progress", cfg.capacity.max_top_level_runs)
+        )
+        live_running = int(
+            conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'running'").fetchone()[0]
+        )
+        # Never let upstream claim more tasks than HCA pre-reserved. This keeps
+        # admission deferrals as ready work instead of turning them into visible
+        # spawn failures after claim.
+        admitted_cap = min(configured_cap, live_running + len(reservations.reserved))
         result = kb.dispatch_once(
             conn,
             spawn_fn=spawn_fn,
             board=cfg.board,
             max_spawn=wave,
-            max_in_progress=kwargs.get(
-                "max_in_progress", cfg.capacity.max_top_level_runs
-            ),
+            max_in_progress=admitted_cap,
             max_in_progress_per_profile=kwargs.get("max_in_progress_per_profile", 1),
             dry_run=kwargs.get("dry_run", False),
         )
@@ -298,6 +429,13 @@ def dispatch_tick(
         for profile in list(reservations.reserved):
             if profile not in spawned_profiles:
                 reservations.release(profile)
-        return _result_to_dict(result)
+        projected = _result_to_dict(result)
+        projected["crashed"] = list(
+            dict.fromkeys([*pre_crashed, *projected.get("crashed", [])])
+        )
+        projected["reclaimed"] = int(projected.get("reclaimed", 0)) + len(
+            pre_crashed
+        )
+        return projected
     finally:
         conn.close()

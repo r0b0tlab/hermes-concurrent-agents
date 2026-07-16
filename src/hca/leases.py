@@ -35,6 +35,7 @@ def acquire_worker_lease(
     run_id: object,
     slot: str,
     pid: Optional[int],
+    pid_start_ticks: Optional[int] = None,
     node: str = "local",
     credits: float = 1.0,
 ) -> bool:
@@ -52,6 +53,7 @@ def acquire_worker_lease(
             "slot": slot,
             "node": node,
             "pid": pid,
+            "pid_start_ticks": pid_start_ticks,
         },
     )
 

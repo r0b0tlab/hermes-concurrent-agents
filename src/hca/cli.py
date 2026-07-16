@@ -80,7 +80,12 @@ def cmd_init(args) -> int:
         StateDB(Path(cfg.state_dir) / "hca.sqlite")
         (Path(cfg.state_dir) / "logs").mkdir(exist_ok=True)
         (Path(cfg.state_dir) / "worktrees").mkdir(exist_ok=True)
-    profiles = init_profiles(cfg, force=args.force, dry_run=args.dry_run)
+    profiles = init_profiles(
+        cfg,
+        force=args.force,
+        dry_run=args.dry_run,
+        source_profile=getattr(args, "source_profile", "default"),
+    )
     out = {
         "preset": cfg.preset,
         "state_dir": cfg.state_dir,
@@ -130,14 +135,27 @@ def _emit_service_result(res, as_json: bool) -> int:
 def cmd_run(args) -> int:
     """One goal in → supervised concurrent team → one evidence-backed result."""
     svc = _service(args)
+    budgets: dict[str, int] = {}
+    try:
+        for item in getattr(args, "budget", []) or []:
+            key, value = item.split("=", 1)
+            budgets[key.strip()] = int(value)
+    except (ValueError, TypeError):
+        print("--budget must be KEY=INTEGER (for example wall_seconds=3600)", file=sys.stderr)
+        return 2
     res = svc.run(
         args.goal,
         project_root=getattr(args, "project", "") or "",
+        constraints=list(getattr(args, "constraint", []) or []),
+        acceptance_criteria=list(getattr(args, "acceptance", []) or []),
+        source_profiles=list(getattr(args, "source_profiles", []) or []),
         team=getattr(args, "team", "default") or "default",
         concurrency=int(getattr(args, "concurrency", 1) or 1),
         review_policy=getattr(args, "review", "auto") or "auto",
+        budgets=budgets,
         idempotency_key=getattr(args, "idempotency_key", "") or "",
         resume=getattr(args, "resume", "") or "",
+        detach=bool(getattr(args, "detach", False)),
     )
     return _emit_service_result(res, args.json)
 
@@ -746,6 +764,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_init.add_argument("--force", action="store_true")
     p_init.add_argument("--dry-run", action="store_true")
+    p_init.add_argument(
+        "--source-profile",
+        default="default",
+        help="Hermes profile whose provider/config/credentials are cloned (default: default)",
+    )
 
     p_doc = sp.add_parser(
         "doctor", parents=[common], help="Validate Hermes/tmux/backend/cluster"
@@ -822,6 +845,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument("goal")
     p_run.add_argument("--project", default="", help="project root path")
+    p_run.add_argument("--constraint", action="append", default=[], help="repeatable run constraint")
+    p_run.add_argument(
+        "--acceptance", action="append", default=[], help="repeatable acceptance criterion"
+    )
+    p_run.add_argument(
+        "--source-profile", dest="source_profiles", action="append", default=[],
+        help="repeatable Hermes source profile preference",
+    )
+    p_run.add_argument(
+        "--budget", action="append", default=[], metavar="KEY=INTEGER",
+        help="repeatable bounded budget (wall_seconds, max_tasks, max_workers, ...)",
+    )
     p_run.add_argument("--team", default="default", choices=["default", "small", "reviewed"])
     p_run.add_argument("--concurrency", type=int, default=1)
     p_run.add_argument("--review", default="auto", choices=["auto", "always", "never"])

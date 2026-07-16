@@ -24,7 +24,7 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "ruff>=0.4"]
+dev = ["pytest>=7.0", "ruff>=0.4", "pyyaml>=6.0"]
 
 [project.scripts]
 hca = "hca.cli:main"

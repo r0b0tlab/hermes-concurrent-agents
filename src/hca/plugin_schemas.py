@@ -4,8 +4,8 @@ Exactly five team tools are registered — no unrestricted command passthrough.
 Schemas are JSON-native and idempotency-aware; every tool result includes a
 ``remediation`` string suitable for agent reasoning. ``hca_team_stop`` is
 authorization-gated *by HCA itself* — the caller must restate the run id as
-``authorization`` — because Hermes does not enforce a tool's ``approval`` schema
-flag; the flag here is descriptive of the HCA-enforced gate, not a no-op.
+``authorization``. The plugin also emits Hermes' supported ``approve``
+pre-tool directive, invoking the real CLI/gateway human approval flow.
 """
 
 from __future__ import annotations
@@ -57,6 +57,31 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 "project": {"type": "string", "description": "optional project root path"},
                 "team": {"type": "string", "enum": ["default", "small", "reviewed"], "default": "default"},
                 "concurrency": {"type": "integer", "minimum": 1, "default": 1},
+                "review_policy": {
+                    "type": "string", "enum": ["auto", "always", "never"], "default": "auto"
+                },
+                "constraints": {"type": "array", "items": {"type": "string"}},
+                "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+                "source_profiles": {"type": "array", "items": {"type": "string"}},
+                "budgets": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "max_tasks": {"type": "integer", "minimum": 0},
+                        "max_workers": {"type": "integer", "minimum": 0},
+                        "wall_seconds": {"type": "integer", "minimum": 0},
+                        "max_turns_per_task": {"type": "integer", "minimum": 0},
+                        "max_retries": {"type": "integer", "minimum": 0},
+                        "max_review_cycles": {"type": "integer", "minimum": 0},
+                        "max_disk_mb": {"type": "integer", "minimum": 0},
+                        "max_subagents": {"type": "integer", "minimum": 0},
+                    },
+                },
+                "detach": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "return after the first admitted dispatch wave; requires fleet supervisor",
+                },
                 "idempotency_key": {"type": "string", "description": "stable key; identical key returns the same run"},
             },
             "required": ["goal"],
@@ -131,8 +156,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         "returns": _result_shape(),
         "mutating": True,
-        # HCA-enforced authorization (see hca.plugin_tools.hca_team_stop), not a
-        # reliance on Hermes to honour this flag.
+        # Real Hermes pre-tool approval plus HCA handler authorization.
         "approval": True,
     },
 }

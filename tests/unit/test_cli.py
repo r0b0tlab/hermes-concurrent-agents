@@ -26,3 +26,35 @@ def test_task_swarm_workers_is_rejected_not_ignored(capsys):
     err = capsys.readouterr().err
     assert "not supported" in err
     assert "--workers" in err
+
+
+def test_run_parser_exposes_shared_goal_contract():
+    args = build_parser().parse_args(
+        [
+            "run",
+            "ship it",
+            "--project",
+            "/tmp/p",
+            "--constraint",
+            "offline",
+            "--acceptance",
+            "tests pass",
+            "--source-profile",
+            "default",
+            "--budget",
+            "wall_seconds=60",
+            "--team",
+            "reviewed",
+            "--concurrency",
+            "2",
+            "--review",
+            "always",
+            "--detach",
+        ]
+    )
+    assert args.goal == "ship it"
+    assert args.constraint == ["offline"]
+    assert args.acceptance == ["tests pass"]
+    assert args.source_profiles == ["default"]
+    assert args.budget == ["wall_seconds=60"]
+    assert args.detach is True

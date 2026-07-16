@@ -37,18 +37,28 @@ def _mem_hysteresis_gate(
 
     Once host memory pressure crosses ``high`` the gate stays closed until it
     falls back below ``low`` (not merely below ``high``), so admission does
-    not flap open/closed on every poll. Unknown pressure never blocks here —
-    it is handled conservatively elsewhere, never treated as zero.
+    not flap open/closed on every poll. If telemetry becomes unknown while the
+    gate is closed, it remains closed until a low-watermark reading proves
+    recovery.
     """
-    if pressure is None:
-        return False, ""
     key = "admission_mem_gate"
     gate_closed = state.get_meta(key, "0") == "1"
+    if pressure is None:
+        if gate_closed:
+            return (
+                True,
+                "host memory pressure unknown while gate is closed "
+                f"(requires low watermark <= {low:.0%})",
+            )
+        return False, ""
     if gate_closed:
         if pressure <= low:
             state.set_meta(key, "0")
             return False, ""
-        return True, f"host memory pressure {pressure:.0%} (gate open below {low:.0%})"
+        return (
+            True,
+            f"host memory pressure {pressure:.0%} (low watermark {low:.0%} required)",
+        )
     if pressure >= high:
         state.set_meta(key, "1")
         return True, f"host memory pressure {pressure:.0%} >= high {high:.0%}"
@@ -97,9 +107,16 @@ def admit(
     running_top_level: Optional[int] = None,
     task_class: str = "batch",
     device_signals=None,
+    capacity: Optional[CapacitySnapshot] = None,
+    probe_backend: bool = False,
 ) -> AdmissionDecision:
     cap_cfg: CapacityConfig = cfg.capacity
-    capacity = fetch_capacity(cfg)
+    # Hermes profiles own provider/model connectivity. Core HCA admission must
+    # not depend on an HCA-managed endpoint probe. Optional diagnostics may pass
+    # a snapshot (or explicitly request a probe); otherwise configured static
+    # caps plus host/device pressure are the conservative authority.
+    if capacity is None and probe_backend:
+        capacity = fetch_capacity(cfg)
 
     # Device admission: host memory/swap/disk from the selected adapter. Runs
     # before backend checks so a memory-pressured host never launches a wave
@@ -128,7 +145,7 @@ def admit(
                 credits, capacity, dev_dict,
             )
 
-    if not capacity.healthy:
+    if capacity is not None and not capacity.healthy:
         return AdmissionDecision(
             False, f"waiting: backend unhealthy ({capacity.detail})", credits, capacity, dev_dict
         )
@@ -155,7 +172,11 @@ def admit(
             dev_dict,
         )
 
-    if capacity.kv_cache_util is not None and capacity.kv_cache_util >= cap_cfg.memory_high:
+    if (
+        capacity is not None
+        and capacity.kv_cache_util is not None
+        and capacity.kv_cache_util >= cap_cfg.memory_high
+    ):
         return AdmissionDecision(
             False,
             f"waiting: backend KV cache pressure {capacity.kv_cache_util:.0%}",
@@ -164,7 +185,11 @@ def admit(
             dev_dict,
         )
 
-    if capacity.waiting and capacity.waiting > max(2.0, cap_cfg.max_total_sequences):
+    if (
+        capacity is not None
+        and capacity.waiting
+        and capacity.waiting > max(2.0, cap_cfg.max_total_sequences)
+    ):
         return AdmissionDecision(
             False,
             f"waiting: backend queue depth {capacity.waiting:.0f}",

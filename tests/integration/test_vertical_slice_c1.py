@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from hca.config import load_fleet_config
@@ -39,6 +40,10 @@ _WORKER_SRC = r"""
 import os, sys, time
 sys.path.insert(0, os.environ["HCA_WORKER_HERMES_SRC"])
 from hermes_cli import kanban_db as kb
+# Keep this deterministic contract worker focused on Kanban state. Plugin-hook
+# behavior has separate integration coverage and can perform optional discovery
+# that is intentionally absent from the minimal source-checkout test env.
+kb._fire_kanban_lifecycle_hook = lambda *args, **kwargs: None
 tid = os.environ["HERMES_KANBAN_TASK"]
 rid = int(os.environ["HERMES_KANBAN_RUN_ID"])
 time.sleep(0.2)
@@ -57,18 +62,105 @@ import time
 time.sleep(30)
 """
 
+_INPUT_WORKER_SRC = r"""
+import os, sys, time
+sys.path.insert(0, os.environ["HCA_WORKER_HERMES_SRC"])
+from hermes_cli import kanban_db as kb
+kb._fire_kanban_lifecycle_hook = lambda *args, **kwargs: None
+tid = os.environ["HERMES_KANBAN_TASK"]
+rid = int(os.environ["HERMES_KANBAN_RUN_ID"])
+time.sleep(0.15)
+conn = kb.connect(board=os.environ.get("HERMES_KANBAN_BOARD") or None)
+try:
+    task = kb.get_task(conn, tid)
+    comments = kb.list_comments(conn, tid)
+    answered = any(c.author == "hca-operator" for c in comments)
+    if task and task.title.startswith("Implement:") and not answered:
+        if not kb.block_task(
+            conn,
+            tid,
+            reason="Which deployment target should be used?",
+            kind="needs_input",
+            expected_run_id=rid,
+        ):
+            raise RuntimeError("needs-input CAS failed")
+    elif not kb.complete_task(
+        conn,
+        tid,
+        result=f"completed {task.title if task else tid}",
+        summary="deterministic input lifecycle worker",
+        expected_run_id=rid,
+    ):
+        raise RuntimeError("completion CAS failed")
+finally:
+    conn.close()
+"""
+
+_REVIEW_WORKER_SRC = r"""
+import os, sys, time
+from pathlib import Path
+sys.path.insert(0, os.environ["HCA_WORKER_HERMES_SRC"])
+from hermes_cli import kanban_db as kb
+# Keep this deterministic contract worker focused on Kanban state. Plugin-hook
+# behavior has separate integration coverage and can perform optional discovery
+# that is intentionally absent from the minimal source-checkout test env.
+kb._fire_kanban_lifecycle_hook = lambda *args, **kwargs: None
+tid = os.environ["HERMES_KANBAN_TASK"]
+rid = int(os.environ["HERMES_KANBAN_RUN_ID"])
+# Real Hermes startup imports the agent/tool stack before opening Kanban. Give
+# dispatch time to persist worker_pid so the upstream first-open integrity
+# probe does not race that write in this intentionally tiny fake worker.
+time.sleep(0.15)
+conn = kb.connect(board=os.environ.get("HERMES_KANBAN_BOARD") or None)
+try:
+    task = kb.get_task(conn, tid)
+    title = task.title if task else ""
+    result = "completed " + title
+    if title.startswith("Independently verify"):
+        state_file = Path(os.environ["HCA_REVIEW_STATE_FILE"])
+        count = int(state_file.read_text() or "0") if state_file.exists() else 0
+        count += 1
+        state_file.write_text(str(count))
+        mode = os.environ.get("HCA_REVIEW_MODE", "accept")
+        reject = mode == "always_reject" or (mode == "reject_once" and count == 1)
+        result = (
+            "HCA_REVIEW: REJECT\nmissing required verification"
+            if reject else
+            "HCA_REVIEW: ACCEPT\nverification passed"
+        )
+    time.sleep(0.1)
+    completed = kb.complete_task(
+        conn,
+        tid,
+        result=result,
+        summary="deterministic lifecycle worker",
+        expected_run_id=rid,
+    )
+    if not completed:
+        raise RuntimeError(f"completion CAS failed for {tid} run {rid}")
+    conn.commit()
+finally:
+    conn.close()
+"""
+
 
 class FakeTmux:
     """Stand-in for TmuxManager: launches a real subprocess worker per slot."""
 
-    def __init__(self, hermes_src: str, worker_src: str = _WORKER_SRC):
+    def __init__(
+        self,
+        hermes_src: str,
+        worker_src: str = _WORKER_SRC,
+        extra_env: dict[str, str] | None = None,
+    ):
         self.hermes_src = hermes_src
         self.worker_src = worker_src
+        self.extra_env = dict(extra_env or {})
         self.procs: list[subprocess.Popen] = []
 
     def run_in_slot(self, name, command, *, env=None, unset_env=None,
                     workdir=None, log_path=None) -> int:
-        worker_env = {**os.environ, **(env or {})}
+        worker_env = {**os.environ, **self.extra_env, **(env or {})}
         worker_env["HCA_WORKER_HERMES_SRC"] = self.hermes_src
         worker_env["PYTHONPATH"] = (
             self.hermes_src + os.pathsep + worker_env.get("PYTHONPATH", "")
@@ -93,6 +185,14 @@ class FakeTmux:
 
 
 def _make_env(monkeypatch, tmp_path: Path, hermes_src: str):
+    import hca.kanban as hca_kanban
+    from hca.resources import AdmissionDecision
+
+    monkeypatch.setattr(
+        hca_kanban,
+        "admit",
+        lambda *args, **kwargs: AdmissionDecision(True, "test admission"),
+    )
     home = tmp_path / "hermes_home"
     (home / "profiles").mkdir(parents=True)
     board_db = tmp_path / "kanban.db"
@@ -102,6 +202,15 @@ def _make_env(monkeypatch, tmp_path: Path, hermes_src: str):
     state_dir.mkdir()
 
     cfg = load_fleet_config(model="m", state_dir=str(state_dir))
+    # The detached controller is a fresh Python process and cannot inherit the
+    # in-process admit monkeypatch above. Serialize non-triggering test-only
+    # pressure thresholds so this lifecycle fixture is independent of the
+    # developer host's current disk/memory utilization. Dedicated admission
+    # tests inject exact DeviceSignals and retain production fail-closed logic.
+    cfg.capacity.memory_high = 1.01
+    cfg.capacity.memory_low = 1.0
+    cfg.capacity.disk_high = 1.01
+    cfg.capacity.disk_low = 1.0
     # Create a real (minimal) profile dir per concrete slot so upstream
     # ``profile_exists`` accepts the assignee and the ready-dispatch path runs.
     for slot in concrete_slots(cfg):
@@ -119,6 +228,9 @@ def _run_slice(
     *, max_wall_seconds=15.0, max_ticks=60, poll_interval=0.1,
 ):
     cfg, state_dir = _make_env(monkeypatch, tmp_path, hermes_runtime.src_path)
+    monkeypatch.setattr(
+        hermes_runtime.kb, "_fire_kanban_lifecycle_hook", lambda *args, **kwargs: None
+    )
     state = StateDB(state_dir / "hca.sqlite")
     tmux = FakeTmux(hermes_runtime.src_path, worker_src=worker_src)
     orch = KanbanOrchestrator(
@@ -220,6 +332,337 @@ def test_c1_slice_blocks_when_worker_never_completes(
     assert col.data["result"]["outcome"] in ("blocked", "failed", "partial")
 
 
+def test_review_rejection_stages_one_bounded_rework_then_accepts(
+    monkeypatch, tmp_path, hermes_runtime
+):
+    cfg, state_dir = _make_env(monkeypatch, tmp_path, hermes_runtime.src_path)
+    monkeypatch.setattr(
+        hermes_runtime.kb, "_fire_kanban_lifecycle_hook", lambda *args, **kwargs: None
+    )
+    state = StateDB(state_dir / "hca.sqlite")
+    tmux = FakeTmux(
+        hermes_runtime.src_path,
+        worker_src=_REVIEW_WORKER_SRC,
+        extra_env={
+            "HCA_REVIEW_MODE": "reject_once",
+            "HCA_REVIEW_STATE_FILE": str(tmp_path / "review-count"),
+        },
+    )
+    orch = KanbanOrchestrator(
+        cfg,
+        state=state,
+        tmux=tmux,
+        board=cfg.board,
+        enforce_sole_dispatcher=False,
+        max_ticks=160,
+        max_wall_seconds=20,
+        poll_interval=0.05,
+    )
+    svc = FleetService(cfg, orchestrator=orch, store=RunStore(state_dir / "runs.sqlite"))
+    try:
+        res = svc.run(
+            "change reviewed code",
+            review_policy="always",
+            budgets={"max_review_cycles": 2, "wall_seconds": 20},
+        )
+    finally:
+        tmux.cleanup()
+
+    assert res.state == "completed", res.remediation
+    events = svc.store.list_events(res.run_id)
+    reworks = [event for event in events if event["kind"] == "run.review_rework"]
+    assert len(reworks) == 1
+    mapping = orch._mapping(svc.store, res.run_id)
+    assert mapping is not None
+    kinds = list(mapping["node_kinds"].values())
+    assert kinds.count("rework") == 1
+    assert kinds.count("review") == 2
+    evidence = _evidence_event(svc.store, res.run_id)
+    reviews = [task for task in evidence["tasks"] if task["kind"] == "review"]
+    assert [task["review_verdict"] for task in reviews] == ["reject", "accept"]
+    assert all(task["run_id"] and task["pid"] for task in reviews)
+    assert state.active_lease_credits() == 0.0
+
+
+def test_review_rejection_budget_blocks_final_without_unbounded_loop(
+    monkeypatch, tmp_path, hermes_runtime
+):
+    cfg, state_dir = _make_env(monkeypatch, tmp_path, hermes_runtime.src_path)
+    monkeypatch.setattr(
+        hermes_runtime.kb, "_fire_kanban_lifecycle_hook", lambda *args, **kwargs: None
+    )
+    state = StateDB(state_dir / "hca.sqlite")
+    tmux = FakeTmux(
+        hermes_runtime.src_path,
+        worker_src=_REVIEW_WORKER_SRC,
+        extra_env={
+            "HCA_REVIEW_MODE": "always_reject",
+            "HCA_REVIEW_STATE_FILE": str(tmp_path / "review-count"),
+        },
+    )
+    orch = KanbanOrchestrator(
+        cfg,
+        state=state,
+        tmux=tmux,
+        board=cfg.board,
+        enforce_sole_dispatcher=False,
+        max_ticks=160,
+        max_wall_seconds=20,
+        poll_interval=0.05,
+    )
+    svc = FleetService(cfg, orchestrator=orch, store=RunStore(state_dir / "runs.sqlite"))
+    try:
+        res = svc.run(
+            "change rejected code",
+            review_policy="always",
+            budgets={"max_review_cycles": 2, "wall_seconds": 20},
+        )
+    finally:
+        tmux.cleanup()
+
+    assert res.state == "blocked"
+    mapping = orch._mapping(svc.store, res.run_id)
+    assert mapping is not None
+    kinds = list(mapping["node_kinds"].values())
+    assert kinds.count("review") == 2
+    assert kinds.count("rework") == 1
+    assert sum(
+        event["kind"] == "run.review_rework"
+        for event in svc.store.list_events(res.run_id)
+    ) == 1
+    gate_id = next(
+        task_id for task_id, kind in mapping["node_kinds"].items() if kind == "gate"
+    )
+    final_id = next(
+        task_id for task_id, kind in mapping["node_kinds"].items() if kind == "final"
+    )
+    assert orch._statuses([gate_id])[gate_id] == "blocked"
+    assert orch._statuses([final_id])[final_id] == "todo"
+    assert state.active_lease_credits() == 0.0
+
+
+def test_needs_input_response_updates_upstream_and_resumes_exact_branch(
+    monkeypatch, tmp_path, hermes_runtime
+):
+    from hca.run import RunSpec, RunState, new_run_id
+
+    cfg, state_dir = _make_env(monkeypatch, tmp_path, hermes_runtime.src_path)
+    monkeypatch.setattr(
+        hermes_runtime.kb, "_fire_kanban_lifecycle_hook", lambda *args, **kwargs: None
+    )
+    state = StateDB(state_dir / "hca.sqlite")
+    tmux = FakeTmux(hermes_runtime.src_path, worker_src=_INPUT_WORKER_SRC)
+    orch = KanbanOrchestrator(
+        cfg,
+        state=state,
+        tmux=tmux,
+        board=cfg.board,
+        enforce_sole_dispatcher=False,
+        max_wall_seconds=15,
+        poll_interval=0.2,
+    )
+    store = RunStore(state_dir / "runs.sqlite")
+    svc = FleetService(cfg, orchestrator=orch, store=store)
+    try:
+        res = svc.run("deploy input-gated change", review_policy="never")
+        assert res.state == "needs_input", res.to_dict()
+        questions = store.open_questions(res.run_id)
+        assert len(questions) == 1
+        question = questions[0]
+        assert question.task_id
+        assert "deployment target" in question.prompt
+        assert state.active_lease_credits() == 0.0
+
+        # A real but different run cannot answer this question.
+        other = RunSpec(
+            run_id=new_run_id(),
+            goal="unrelated",
+            board=cfg.board,
+            created_at=time.time(),
+        )
+        store.create_run(other, state=RunState.QUEUED)
+        wrong = svc.respond(other.run_id, question.question_id, "staging")
+        assert not wrong.ok and "belongs to run" in wrong.message
+
+        answered = svc.respond(res.run_id, question.question_id, "staging")
+        assert answered.state in {"running", "completed"}
+        duplicate = svc.respond(res.run_id, question.question_id, "staging")
+        assert not duplicate.ok and "already answered" in duplicate.message
+
+        deadline = time.time() + 15
+        status = answered
+        while time.time() < deadline and status.state != "completed":
+            status = svc.reconcile(res.run_id, dispatch=True)
+            time.sleep(0.2)
+        assert status.state == "completed", status.to_dict()
+        assert not store.open_questions(res.run_id)
+
+        mapping = orch._mapping(store, res.run_id)
+        assert mapping is not None
+        work_id = next(
+            task_id
+            for task_id, kind in mapping["node_kinds"].items()
+            if kind == "work"
+        )
+        conn = hermes_runtime.kb.connect(board=cfg.board)
+        try:
+            comments = hermes_runtime.kb.list_comments(conn, work_id)
+            operator_comments = [c for c in comments if c.author == "hca-operator"]
+            assert len(operator_comments) == 1
+            assert "staging" in operator_comments[0].body
+            attempts = conn.execute(
+                "SELECT id, status, outcome FROM task_runs WHERE task_id = ? ORDER BY id",
+                (work_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(attempts) == 2
+        assert attempts[0][2] == "blocked"
+        assert attempts[1][2] == "completed"
+        assert state.active_lease_credits() == 0.0
+    finally:
+        tmux.cleanup()
+
+
+def test_c1_detach_returns_running_handle_without_corrupting_status(
+    monkeypatch, tmp_path, hermes_runtime
+):
+    import time as _t
+
+    cfg, state_dir = _make_env(monkeypatch, tmp_path, hermes_runtime.src_path)
+    monkeypatch.setattr(
+        hermes_runtime.kb, "_fire_kanban_lifecycle_hook", lambda *args, **kwargs: None
+    )
+    state = StateDB(state_dir / "hca.sqlite")
+    tmux = FakeTmux(hermes_runtime.src_path, worker_src=_IDLE_WORKER_SRC)
+    orch = KanbanOrchestrator(
+        cfg,
+        state=state,
+        tmux=tmux,
+        board=cfg.board,
+        enforce_sole_dispatcher=False,
+    )
+    svc = FleetService(cfg, orchestrator=orch, store=RunStore(state_dir / "runs.sqlite"))
+    started = _t.monotonic()
+    try:
+        res = svc.run("long detached goal", review_policy="never", detach=True)
+        elapsed = _t.monotonic() - started
+        assert elapsed < 3.0
+        assert res.state == "running"
+        # A read-only status projection sees a live worker and must remain
+        # running — merely inspecting a detached run must never mark it blocked.
+        status = svc.status(res.run_id)
+        assert status.state == "running"
+        assert state.active_lease_credits() >= 1.0
+        stopped = svc.stop(res.run_id)
+        assert stopped.state == "cancelled"
+    finally:
+        tmux.cleanup()
+
+
+def test_detached_controller_finishes_real_tmux_kanban_chain(
+    monkeypatch, tmp_path, hermes_runtime
+):
+    """A detached run keeps dispatching after the submitting service returns."""
+    import time as _t
+
+    from hca.controller import stop_controller
+    from hca.run import RunState
+    from hca.tmux import TmuxManager
+
+    cfg, state_dir = _make_env(monkeypatch, tmp_path, hermes_runtime.src_path)
+    cfg.tmux_socket = f"hca-c1-detach-{os.getpid()}-{tmp_path.name}"
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        hermes_runtime.src_path + os.pathsep + os.environ.get("PYTHONPATH", ""),
+    )
+    shim = tmp_path / "hermes-worker-shim"
+    shim.write_text(
+        f'''#!{sys.executable}
+import os
+import time
+from hermes_cli import kanban_db as kb
+kb._fire_kanban_lifecycle_hook = lambda *args, **kwargs: None
+time.sleep(0.1)
+conn = kb.connect(board=os.environ.get("HERMES_KANBAN_BOARD") or None)
+try:
+    task_id = os.environ["HERMES_KANBAN_TASK"]
+    run_id = int(os.environ["HERMES_KANBAN_RUN_ID"])
+    if not kb.complete_task(
+        conn,
+        task_id,
+        result=f"completed {{task_id}}",
+        summary="detached controller worker",
+        expected_run_id=run_id,
+    ):
+        raise SystemExit(3)
+finally:
+    conn.close()
+''',
+        encoding="utf-8",
+    )
+    shim.chmod(0o700)
+    monkeypatch.setenv("HERMES_BIN", str(shim))
+
+    svc = FleetService(cfg)
+    res = svc.run(
+        "finish detached chain",
+        review_policy="never",
+        budgets={"wall_seconds": 30},
+        detach=True,
+    )
+    run_id = res.run_id
+    status = res
+    controller_identity = state_dir / "controllers" / f"{run_id}.pid.json"
+    original = json.loads(controller_identity.read_text(encoding="utf-8"))
+    original_pid = int(original["pid"])
+    os.kill(original_pid, 9)
+    gone_deadline = _t.time() + 5
+    while Path(f"/proc/{original_pid}").exists() and _t.time() < gone_deadline:
+        _t.sleep(0.05)
+    assert not Path(f"/proc/{original_pid}").exists()
+    # A status call recognizes the dead exact identity and starts one replacement.
+    svc.status(run_id)
+    replacement_deadline = _t.time() + 5
+    replacement = original
+    while _t.time() < replacement_deadline:
+        replacement = json.loads(controller_identity.read_text(encoding="utf-8"))
+        if int(replacement["pid"]) != original_pid:
+            break
+        _t.sleep(0.05)
+    assert int(replacement["pid"]) != original_pid
+    try:
+        deadline = _t.time() + 30
+        while _t.time() < deadline:
+            status = svc.status(run_id)
+            if status.state in {"completed", "failed", "cancelled"}:
+                break
+            _t.sleep(0.2)
+        assert status.state == "completed", status.to_dict()
+        assert isinstance(svc.orchestrator, KanbanOrchestrator)
+        mapping = svc.orchestrator._mapping(svc.store, run_id)
+        assert mapping is not None
+        statuses = svc.orchestrator._statuses(mapping["child_task_ids"])
+        assert set(statuses.values()) == {"done"}
+        state = StateDB(state_dir / "hca.sqlite")
+        assert state.active_lease_credits() == 0.0
+        runs = state.list_runs(status=None)
+        assert len(runs) == 2
+        assert all(run.pid and run.status == "completed" for run in runs)
+    finally:
+        projection = svc.store.get_run(run_id)
+        if projection and projection.state not in {
+            RunState.COMPLETED,
+            RunState.FAILED,
+            RunState.CANCELLED,
+        }:
+            svc.stop(run_id)
+        stop_controller(cfg.state_dir, run_id)
+        tmux = TmuxManager(cfg.tmux_socket)
+        for name in tmux.list_sessions():
+            tmux.kill_session(name)
+
+
 def test_c1_stop_terminates_owned_worker_and_reconciles(
     monkeypatch, tmp_path, hermes_runtime
 ):
@@ -231,6 +674,9 @@ def test_c1_stop_terminates_owned_worker_and_reconciles(
     from hca.run import RunSpec, RunState, new_run_id
 
     cfg, state_dir = _make_env(monkeypatch, tmp_path, hermes_runtime.src_path)
+    monkeypatch.setattr(
+        hermes_runtime.kb, "_fire_kanban_lifecycle_hook", lambda *args, **kwargs: None
+    )
     state = StateDB(state_dir / "hca.sqlite")
     tmux = FakeTmux(hermes_runtime.src_path, worker_src=_IDLE_WORKER_SRC)
     orch = KanbanOrchestrator(
@@ -259,6 +705,14 @@ def test_c1_stop_terminates_owned_worker_and_reconciles(
     assert orch._statuses([work_id])[work_id] == "running"
     # a durable lease is held while the worker runs (governs admission)
     assert state.active_lease_credits() >= 1.0
+    state.acquire_lease(
+        "subagent-active-child",
+        kind="subagent",
+        owner=work_id,
+        credits=1.0,
+        meta={"phase": "active", "parent": work_id},
+    )
+    assert state.active_lease_credits(kind="subagent") == 1.0
 
     try:
         res = svc.stop(spec.run_id)
@@ -271,3 +725,64 @@ def test_c1_stop_terminates_owned_worker_and_reconciles(
     assert state.active_lease_credits() == 0.0  # lease released on stop
     col = svc.collect(spec.run_id)
     assert col.data["result"]["outcome"] == "cancelled"
+
+
+def test_c1_dead_worker_is_reclaimed_and_replaced_once(
+    monkeypatch, tmp_path, hermes_runtime
+):
+    import signal
+    import time as _t
+
+    from hca.run import RunSpec, RunState, new_run_id
+
+    cfg, state_dir = _make_env(monkeypatch, tmp_path, hermes_runtime.src_path)
+    monkeypatch.setattr(
+        hermes_runtime.kb, "_fire_kanban_lifecycle_hook", lambda *args, **kwargs: None
+    )
+    state = StateDB(state_dir / "hca.sqlite")
+    tmux = FakeTmux(hermes_runtime.src_path, worker_src=_IDLE_WORKER_SRC)
+    orch = KanbanOrchestrator(
+        cfg,
+        state=state,
+        tmux=tmux,
+        board=cfg.board,
+        enforce_sole_dispatcher=False,
+    )
+    store = RunStore(state_dir / "runs.sqlite")
+    spec = RunSpec(
+        run_id=new_run_id(),
+        goal="recover one crashed worker",
+        board=cfg.board,
+        created_at=_t.time(),
+    )
+    store.create_run(spec, state=RunState.QUEUED)
+    store.set_state(spec.run_id, RunState.PLANNING)
+    orch.plan(spec, store)
+    store.set_state(spec.run_id, RunState.RUNNING)
+    orch._dispatch_tick(1)
+
+    mapping = orch._mapping(store, spec.run_id)
+    work_id = mapping["child_task_ids"][0]
+    first = state.latest_run_for_task(cfg.board, work_id)
+    assert first is not None and first.pid and first.pid_start_ticks
+    os.killpg(os.getpgid(first.pid), signal.SIGKILL)
+    for proc in tmux.procs:
+        if proc.pid == first.pid:
+            proc.wait(timeout=5)
+            break
+
+    try:
+        orch.tick(spec, store, dispatch=True)
+        second = state.latest_run_for_task(cfg.board, work_id)
+        assert second is not None
+        assert second.run_id != first.run_id
+        assert second.pid != first.pid
+        assert second.status == "running"
+        attempts = [run for run in state.list_runs(status=None) if run.task_id == work_id]
+        assert sorted(run.status for run in attempts) == ["crashed", "running"]
+        assert state.active_lease_credits() == 1.0
+        assert orch._statuses([work_id])[work_id] == "running"
+    finally:
+        svc = FleetService(cfg, orchestrator=orch, store=store)
+        svc.stop(spec.run_id)
+        tmux.cleanup()

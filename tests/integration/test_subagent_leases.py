@@ -28,7 +28,7 @@ def test_delegation_blocked_by_default(plugin_env, monkeypatch):
     monkeypatch.delenv("HCA_MAX_SUBAGENT_CREDITS", raising=False)  # default 0
     plugin = plugin_env["plugin"]
     out = plugin.on_pre_tool_call("delegate_task", {"tasks": [{"goal": "x"}]})
-    assert out and out.get("block") is True
+    assert out and out.get("action") == "block"
     assert "budget exceeded" in out["message"]
 
 
@@ -65,7 +65,7 @@ def test_budget_ceiling_not_exceeded_by_parent_and_child(plugin_env, monkeypatch
     assert plugin.on_pre_tool_call("delegate_task", {"tasks": [1, 2]}) is None
     # a further delegation would push past the ceiling → blocked
     out = plugin.on_pre_tool_call("delegate_task", {"tasks": [1]})
-    assert out and out["block"] is True
+    assert out and out["action"] == "block"
 
 
 def test_long_running_child_stays_counted(plugin_env, monkeypatch):

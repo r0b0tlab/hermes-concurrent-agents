@@ -71,6 +71,9 @@ def _make_cfg(board, state_dir):
 
 @pytest.fixture
 def hermes_env(tmp_path, monkeypatch):
+    import hca.kanban as hca_kanban
+    from hca.resources import AdmissionDecision
+
     home = tmp_path / "hermes_home"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -85,6 +88,12 @@ def hermes_env(tmp_path, monkeypatch):
     profiles = _profiles()
     for i in (1, 2):
         profiles.get_profile_dir(f"hca-t-coder-0{i}").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        hca_kanban,
+        "admit",
+        lambda *args, **kwargs: AdmissionDecision(True, "test admission"),
+    )
+    monkeypatch.setattr(hca_kanban, "proc_start_ticks", lambda pid: pid * 10)
     return {"home": home, "board": board, "kb": kb, "db_path": db_path}
 
 
@@ -134,7 +143,7 @@ def test_two_tasks_route_to_distinct_concrete_slots(hermes_env, tmp_path):
         assert "--cli" in c["command"]
 
 
-def test_third_task_on_busy_profile_is_capacity_capped(hermes_env, tmp_path):
+def test_second_task_on_busy_profile_stays_ready_before_claim(hermes_env, tmp_path):
     from hca.kanban import dispatch_tick
     from hca.state import StateDB
 
@@ -148,13 +157,29 @@ def test_third_task_on_busy_profile_is_capacity_capped(hermes_env, tmp_path):
 
     result = dispatch_tick(cfg, state, tmux, skip_sole_dispatcher_check=True, max_spawn=4)
 
-    # exactly one spawned on the profile; the other is per-profile-capped and
-    # stays ready — never a silent duplicate on the same concrete slot.
+    # Exactly one is admitted and spawned. HCA bounds upstream's global claim
+    # count to its pre-reservations, so upstream intentionally never scans the
+    # second task far enough to report a post-claim per-profile skip.
     assert len(result["spawned"]) == 1
-    assert len(result["skipped_per_profile_capped"]) == 1
-    # no duplicate live-slot rows
+    assert result["skipped_per_profile_capped"] == []
+    assert result["auto_blocked"] == []
+
+    # The deferred task remains ordinary ready work, rather than becoming a
+    # claimed spawn failure, and there is no duplicate live-slot row/lease.
+    conn = sqlite3.connect(str(db_path))
+    try:
+        statuses = [
+            row[0]
+            for row in conn.execute(
+                "SELECT status FROM tasks WHERE title IN ('t1', 't2') ORDER BY status"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    assert statuses == ["ready", "running"]
     running = state.list_runs(status="running")
     assert len(running) == 1
+    assert state.active_lease_credits() == 1.0
 
 
 def test_unreserved_spawn_raises_not_none(hermes_env, tmp_path):
@@ -180,3 +205,78 @@ def test_unreserved_spawn_raises_not_none(hermes_env, tmp_path):
         spawn_fn(_Task(), str(tmp_path / "ws"), board=hermes_env["board"])
     # nothing launched
     assert not tmux.calls
+
+
+def test_pressure_deferral_stays_ready_and_unclaimed(
+    hermes_env, tmp_path, monkeypatch
+):
+    import hca.kanban as hca_kanban
+    from hca.kanban import dispatch_tick
+    from hca.resources import AdmissionDecision
+    from hca.state import StateDB
+
+    kb, board, db_path = hermes_env["kb"], hermes_env["board"], hermes_env["db_path"]
+    task_id = _create_task(kb, db_path, board, "pressure", "hca-t-coder-01")
+    monkeypatch.setattr(
+        hca_kanban,
+        "admit",
+        lambda *args, **kwargs: AdmissionDecision(
+            False, "waiting: disk pressure 95% >= high 90%"
+        ),
+    )
+    cfg = _make_cfg(board, tmp_path / "state")
+    state = StateDB(tmp_path / "state" / "hca.sqlite")
+    tmux = FakeTmux()
+
+    result = dispatch_tick(cfg, state, tmux, skip_sole_dispatcher_check=True)
+    assert result["spawned"] == []
+    assert result["auto_blocked"] == []
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT status, claim_lock, worker_pid FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert dict(row) == {"status": "ready", "claim_lock": None, "worker_pid": None}
+    assert state.list_runs(status=None) == []
+    assert state.active_lease_credits() == 0.0
+    assert any(
+        a["kind"] == "admission.wait" and "disk pressure" in a["message"]
+        for a in state.recent_activity()
+    )
+
+
+def test_per_role_cap_defers_second_profile_before_claim(hermes_env, tmp_path):
+    from hca.kanban import dispatch_tick
+    from hca.state import StateDB
+
+    kb, board, db_path = hermes_env["kb"], hermes_env["board"], hermes_env["db_path"]
+    first = _create_task(kb, db_path, board, "one", "hca-t-coder-01")
+    second = _create_task(kb, db_path, board, "two", "hca-t-coder-02")
+    cfg = _make_cfg(board, tmp_path / "state")
+    cfg.capacity.per_role_caps = {"coder": 1}
+    state = StateDB(tmp_path / "state" / "hca.sqlite")
+
+    result = dispatch_tick(
+        cfg, state, FakeTmux(), max_spawn=2, skip_sole_dispatcher_check=True
+    )
+    assert len(result["spawned"]) == 1
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                "SELECT id, status FROM tasks WHERE id IN (?, ?)", (first, second)
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert sorted(statuses.values()) == ["ready", "running"]
+    assert state.active_lease_credits() == 1.0
+    assert any(
+        a["kind"] == "admission.wait" and "role coder cap 1" in a["message"]
+        for a in state.recent_activity()
+    )

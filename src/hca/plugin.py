@@ -63,6 +63,18 @@ def _parent_owner() -> str:
 
 
 def on_pre_tool_call(tool_name: str, args: dict, **kwargs) -> Optional[dict]:
+    if tool_name == "hca_team_stop":
+        run_id = str((args or {}).get("run_id", "")).strip()
+        if not run_id:
+            return {"action": "block", "message": "run_id is required to stop a run"}
+        # Stable Hermes v2026.7.7.2 recognizes this directive and escalates to
+        # its real CLI/gateway human approval flow. The handler additionally
+        # requires authorization=run_id as defense against a mis-targeted retry.
+        return {
+            "action": "approve",
+            "message": f"Cancel HCA run {run_id} and terminate its owned workers?",
+            "rule_key": f"hca_team_stop:{run_id}",
+        }
     if tool_name != "delegate_task":
         return None
     db = _state_db()
@@ -81,7 +93,7 @@ def on_pre_tool_call(tool_name: str, args: dict, **kwargs) -> Optional[dict]:
             "of subagents, or continue sequentially."
         )
         db.set_activity(kind="admission.wait", message=msg)
-        return {"block": True, "message": msg}
+        return {"action": "block", "message": msg}
     # Reserve provisional leases WITHOUT a fixed expiry (a long child must stay
     # counted). Each reservation is tagged with the parent so session-end can
     # reconcile orphans that never produced a subagent_start.

@@ -151,6 +151,17 @@ def test_empty_goal_is_invalid(tmp_path):
     assert not res.ok
 
 
+def test_unknown_budget_and_overlarge_concurrency_are_rejected(tmp_path):
+    svc = FleetService(_cfg(tmp_path), orchestrator=PreflightOrchestrator())
+    unknown = svc.run("build x", budgets={"mystery": 3})
+    assert unknown.code == EXIT_INVALID
+    assert "unknown budget" in unknown.message
+    # small is explicitly one worker; the request must not be silently ignored.
+    too_wide = svc.run("build x", team="small", concurrency=2)
+    assert too_wide.code == EXIT_INVALID
+    assert "exceeds" in too_wide.message
+
+
 def test_idempotency_key_dedups(tmp_path):
     svc = FleetService(_cfg(tmp_path), orchestrator=CompletingOrchestrator())
     a = svc.run("build x", idempotency_key="k1")
@@ -187,6 +198,52 @@ def test_stop_never_becomes_completion(tmp_path):
     assert stopped.state == "cancelled"
     col = svc.collect(res.run_id)
     assert col.data["result"]["outcome"] == "cancelled"
+
+
+def test_stop_persists_stopping_before_signalling_detached_controller(
+    tmp_path, monkeypatch
+):
+    svc = FleetService(_cfg(tmp_path), orchestrator=NeedsInputOrchestrator())
+    res = svc.run("goal")
+    svc._controller_enabled = True
+    svc.store.append_event(res.run_id, "run.detached", "detached")
+    observed = []
+
+    def fake_stop(_state_dir, run_id):
+        observed.append(svc.store.get_run(run_id).state)
+        return True
+
+    monkeypatch.setattr("hca.controller.stop_controller", fake_stop)
+    stopped = svc.stop(res.run_id)
+    assert stopped.state == "cancelled"
+    assert observed == [RunState.STOPPING]
+
+
+class CancellationFailureOrchestrator(NeedsInputOrchestrator):
+    def cancel(self, spec, store):
+        raise RuntimeError("owned worker survived escalation")
+
+
+def test_stop_failure_blocks_instead_of_claiming_cancellation(tmp_path):
+    svc = FleetService(_cfg(tmp_path), orchestrator=CancellationFailureOrchestrator())
+    res = svc.run("goal")
+    stopped = svc.stop(res.run_id)
+    assert stopped.state == "blocked"
+    assert "cancellation incomplete" in stopped.data["run"]["reason"]
+
+
+def test_terminal_detached_status_never_restarts_controller(tmp_path, monkeypatch):
+    svc = FleetService(_cfg(tmp_path), orchestrator=CompletingOrchestrator())
+    res = svc.run("goal")
+    svc._controller_enabled = True
+    svc.store.append_event(res.run_id, "run.detached", "detached")
+
+    def forbidden_launch(*args, **kwargs):
+        raise AssertionError("terminal runs must not restart controllers")
+
+    monkeypatch.setattr("hca.controller.launch_controller", forbidden_launch)
+    status = svc.status(res.run_id)
+    assert status.state == "completed"
 
 
 def test_collect_manifest_has_sha_and_honest_outcome(tmp_path):

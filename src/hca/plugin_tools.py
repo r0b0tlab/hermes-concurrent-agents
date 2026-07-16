@@ -36,7 +36,13 @@ def hca_team_run(
     project: str = "",
     team: str = "default",
     concurrency: int = 1,
+    review_policy: str = "auto",
+    constraints: Optional[list[str]] = None,
+    acceptance_criteria: Optional[list[str]] = None,
+    source_profiles: Optional[list[str]] = None,
+    budgets: Optional[dict[str, int]] = None,
     idempotency_key: str = "",
+    detach: bool = False,
     *,
     service: Optional[FleetService] = None,
 ) -> dict[str, Any]:
@@ -46,9 +52,15 @@ def hca_team_run(
     return svc.run(
         goal,
         project_root=project,
+        constraints=list(constraints or []),
+        acceptance_criteria=list(acceptance_criteria or []),
+        source_profiles=list(source_profiles or []),
         team=team,
         concurrency=int(concurrency or 1),
+        review_policy=review_policy,
+        budgets=dict(budgets or {}),
         idempotency_key=idempotency_key,
+        detach=bool(detach),
     ).to_dict()
 
 
@@ -84,12 +96,9 @@ def hca_team_stop(
     *,
     service: Optional[FleetService] = None,
 ) -> dict[str, Any]:
-    # Honest, code-enforced authorization gate. Hermes does NOT enforce a
-    # tool's ``approval`` schema flag, so a stop cannot rely on it. Instead HCA
-    # requires the caller to explicitly restate the run id as ``authorization``
-    # before a cancellation runs — a real confirmation that prevents an agent
-    # (or a mis-fired retry) from cancelling the wrong run. Cancellation kills
-    # worker process groups, so it must be deliberate.
+    # Defense in depth after the real Hermes pre-tool human-approval gate:
+    # explicitly restate the run id so a retried/mis-targeted call cannot stop
+    # a different run. Cancellation kills process groups, so both gates matter.
     if not run_id:
         return _invalid("stop", "run_id is required")
     if str(authorization).strip() != str(run_id).strip():

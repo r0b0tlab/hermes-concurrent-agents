@@ -52,6 +52,10 @@ def test_fresh_db_is_current(tmp_path):
             ).fetchall()
         }
         assert {"hca_runs", "hca_questions", "hca_run_events"} <= names
+        run_columns = {
+            r["name"] for r in conn.execute("PRAGMA table_info(runs)").fetchall()
+        }
+        assert "pid_start_ticks" in run_columns
     finally:
         conn.close()
 
@@ -66,6 +70,10 @@ def test_upgrade_v1_preserves_data(tmp_path):
         assert current_version(conn) == CURRENT_SCHEMA_VERSION
         row = conn.execute("SELECT message FROM activity WHERE kind='x'").fetchone()
         assert row["message"] == "legacy"  # data preserved
+        run_columns = {
+            r["name"] for r in conn.execute("PRAGMA table_info(runs)").fetchall()
+        }
+        assert "pid_start_ticks" in run_columns
         # a backup file was written next to the DB
     finally:
         conn.close()

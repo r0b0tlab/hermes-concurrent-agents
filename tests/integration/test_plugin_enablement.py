@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
+from pathlib import Path
 
 import pytest
 
-from hca.plugin import register
+from hca.plugin import on_pre_tool_call, register
 from hca.plugin_schemas import TEAM_TOOL_NAMES
 from hca.plugin_tools import TOOL_HANDLERS
 
@@ -69,7 +71,39 @@ def test_register_fails_loudly_without_hermes_registrar():
         register(HooksOnly())
 
 
-def test_live_plugin_context_signature_is_compatible_when_installed():
-    plugins = pytest.importorskip("hermes_cli.plugins")
+def _live_module(monkeypatch, name):
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        candidate = Path.home() / ".hermes" / "hermes-agent"
+        if candidate.is_dir():
+            monkeypatch.syspath_prepend(str(candidate))
+        return pytest.importorskip(name)
+
+
+def test_live_plugin_context_signature_is_compatible_when_installed(monkeypatch):
+    plugins = _live_module(monkeypatch, "hermes_cli.plugins")
     params = inspect.signature(plugins.PluginContext.register_tool).parameters
     assert {"name", "toolset", "schema", "handler"} <= set(params)
+
+
+def test_live_hermes_dispatcher_enforces_stop_approval_directive(monkeypatch):
+    plugins = _live_module(monkeypatch, "hermes_cli.plugins")
+    approval = _live_module(monkeypatch, "tools.approval")
+    directive = on_pre_tool_call(
+        "hca_team_stop",
+        {"run_id": "run-live-gate", "authorization": "run-live-gate"},
+    )
+    monkeypatch.setattr(plugins, "invoke_hook", lambda *args, **kwargs: [directive])
+    monkeypatch.setattr(
+        approval,
+        "request_tool_approval",
+        lambda *args, **kwargs: {"approved": False, "message": "human denied"},
+    )
+    assert plugins.resolve_pre_tool_block("hca_team_stop", {}) == "human denied"
+    monkeypatch.setattr(
+        approval,
+        "request_tool_approval",
+        lambda *args, **kwargs: {"approved": True},
+    )
+    assert plugins.resolve_pre_tool_block("hca_team_stop", {}) is None

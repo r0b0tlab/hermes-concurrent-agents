@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 VERSION_KEY = "schema_version"
 
@@ -75,6 +75,11 @@ CREATE INDEX IF NOT EXISTS idx_hca_run_events_run ON hca_run_events(run_id);
 
 MIGRATIONS: list[Migration] = [
     Migration(version=2, name="run_projection_tables", up_sql=_RUN_TABLES_SQL),
+    Migration(
+        version=3,
+        name="worker_process_start_identity",
+        up_sql="ALTER TABLE runs ADD COLUMN pid_start_ticks INTEGER;",
+    ),
 ]
 
 
@@ -119,6 +124,14 @@ def _verify(conn: sqlite3.Connection, *, target: int) -> None:
         if missing:
             raise MigrationError(
                 "migration verification missing table(s): " + ", ".join(sorted(missing))
+            )
+    if target >= 3:
+        columns = {
+            str(r[1]) for r in conn.execute("PRAGMA table_info(runs)").fetchall()
+        }
+        if "pid_start_ticks" not in columns:
+            raise MigrationError(
+                "migration verification missing runs.pid_start_ticks"
             )
 
 

@@ -87,6 +87,7 @@ class RunRecord:
     updated_at: float
     last_activity: Optional[str]
     error: Optional[str]
+    pid_start_ticks: Optional[int] = None
 
 
 class StateDB:
@@ -155,13 +156,14 @@ class StateDB:
                 INSERT INTO runs(
                   board, task_id, run_id, slot, node, tmux_session, pid,
                   hermes_session_id, workspace, status, started_at, updated_at,
-                  last_activity, error
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  last_activity, error, pid_start_ticks
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(board, run_id) DO UPDATE SET
                   slot=excluded.slot,
                   node=excluded.node,
                   tmux_session=excluded.tmux_session,
                   pid=excluded.pid,
+                  pid_start_ticks=excluded.pid_start_ticks,
                   hermes_session_id=excluded.hermes_session_id,
                   workspace=excluded.workspace,
                   status=excluded.status,
@@ -184,6 +186,7 @@ class StateDB:
                     rec.updated_at,
                     rec.last_activity,
                     rec.error,
+                    rec.pid_start_ticks,
                 ),
             )
 
@@ -346,6 +349,17 @@ class StateDB:
             )
             return cur.rowcount
 
+    def release_leases_by_owner(self, owner: str, *, kind: Optional[str] = None) -> int:
+        """Release exact child/reservation leases owned by one parent worker."""
+        with self.connection() as conn:
+            if kind is None:
+                cur = conn.execute("DELETE FROM leases WHERE owner=?", (owner,))
+            else:
+                cur = conn.execute(
+                    "DELETE FROM leases WHERE owner=? AND kind=?", (owner, kind)
+                )
+            return cur.rowcount
+
     def list_leases(self, kind: Optional[str] = None) -> list[dict[str, Any]]:
         now = time.time()
         with self.connection() as conn:
@@ -449,4 +463,5 @@ class StateDB:
             updated_at=row["updated_at"],
             last_activity=row["last_activity"],
             error=row["error"],
+            pid_start_ticks=row["pid_start_ticks"],
         )

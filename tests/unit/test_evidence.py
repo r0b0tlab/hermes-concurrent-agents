@@ -73,13 +73,24 @@ def test_done_without_result_or_artifact_is_not_completion():
     assert "result or artifact" in reason.lower()
 
 
-def test_non_terminal_task_holds_blocked():
+def test_non_terminal_projection_stays_running():
     ev = ExecutionEvidence(
         root_task_id="t1", tasks=[_done_task(terminal_status="running")]
     )
     state, reason = derive_final_state(_spec(), ev)
+    assert state == RunState.RUNNING
+    assert "not terminal" in reason
+
+
+def test_exhausted_execution_window_holds_blocked():
+    ev = ExecutionEvidence(
+        root_task_id="t1",
+        tasks=[_done_task(terminal_status="running")],
+        reason="execution observation window exhausted",
+    )
+    state, reason = derive_final_state(_spec(), ev)
     assert state == RunState.BLOCKED
-    assert "in flight" in reason.lower()
+    assert "exhausted" in reason
 
 
 def test_fatal_task_is_failed():
@@ -115,6 +126,8 @@ def test_review_by_implementer_is_not_independent():
         assignee="hca-f-qa-01",
         is_review=True,
         reviewed_by="hca-f-coder-01",  # the implementer reviewing itself
+        review_verdict="accept",
+        result="HCA_REVIEW: ACCEPT\nlooks good",
         is_root=False,
     )
     ev = ExecutionEvidence(root_task_id="root", tasks=[work, root, review])
@@ -132,8 +145,67 @@ def test_independent_review_completes():
         assignee="hca-f-qa-01",
         is_review=True,
         reviewed_by="hca-f-qa-01",
+        review_verdict="accept",
+        result="HCA_REVIEW: ACCEPT\nverified",
         is_root=False,
     )
     ev = ExecutionEvidence(root_task_id="root", tasks=[work, root, review])
     state, _ = derive_final_state(spec, ev)
     assert state == RunState.COMPLETED
+
+
+def test_accepted_review_without_execution_proof_is_rejected():
+    spec = _spec(review_policy="always")
+    work = _done_task(task_id="w1", kind="work", is_root=False)
+    root = _done_task(task_id="root", kind="final", is_root=True)
+    review = _done_task(
+        task_id="rev",
+        assignee="hca-f-qa-01",
+        is_review=True,
+        reviewed_by="hca-f-qa-01",
+        review_verdict="accept",
+        result="HCA_REVIEW: ACCEPT",
+        run_id=None,
+        kind="review",
+        is_root=False,
+    )
+    state, reason = derive_final_state(
+        spec, ExecutionEvidence(root_task_id="root", tasks=[work, root, review])
+    )
+    assert state == RunState.BLOCKED
+    assert "review" in reason.lower()
+    assert "run id" in reason.lower()
+
+
+def test_latest_rejected_review_cannot_be_hidden_by_earlier_acceptance():
+    spec = _spec(review_policy="always")
+    work = _done_task(task_id="w1", kind="work", is_root=False)
+    root = _done_task(task_id="root", kind="final", is_root=True)
+    accepted = _done_task(
+        task_id="rev-1",
+        assignee="hca-f-qa-01",
+        is_review=True,
+        reviewed_by="hca-f-qa-01",
+        review_verdict="accept",
+        result="HCA_REVIEW: ACCEPT",
+        kind="review",
+        is_root=False,
+    )
+    rejected = _done_task(
+        task_id="rev-2",
+        assignee="hca-f-qa-01",
+        is_review=True,
+        reviewed_by="hca-f-qa-01",
+        review_verdict="reject",
+        result="HCA_REVIEW: REJECT\nregression",
+        kind="review",
+        is_root=False,
+    )
+    state, reason = derive_final_state(
+        spec,
+        ExecutionEvidence(
+            root_task_id="root", tasks=[work, accepted, rejected, root]
+        ),
+    )
+    assert state == RunState.BLOCKED
+    assert "rejected" in reason.lower()
