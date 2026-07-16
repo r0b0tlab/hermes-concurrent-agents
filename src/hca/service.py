@@ -437,11 +437,20 @@ class FleetService:
                 True, EXIT_OK, "stop", run_id, proj.state.value,
                 f"run already terminal ({proj.state.value}); nothing to stop",
             )
-        # State machine: mark stopping, then cancelled. Never turn a stop into
-        # a completion. Partial work/evidence is preserved (never deleted here).
+        # State machine: mark stopping, run the real cancellation seam
+        # (process-group TERM/KILL + Kanban reconcile), then cancelled. Never
+        # turn a stop into a completion. Partial work/evidence is preserved.
+        reason = "cancelled by operator"
         try:
             self.store.set_state(run_id, RunState.STOPPING, reason="stop requested")
-            self.store.set_state(run_id, RunState.CANCELLED, reason="cancelled by operator")
+            cancel = getattr(self.orchestrator, "cancel", None)
+            spec = self.store.get_spec(run_id)
+            if callable(cancel) and spec is not None:
+                try:
+                    reason = cancel(spec, self.store) or reason
+                except Exception as exc:  # never let a cancel error strand the run
+                    reason = f"cancelled (cancellation seam error: {exc})"
+            self.store.set_state(run_id, RunState.CANCELLED, reason=reason)
         except RunStateError as exc:
             return ServiceResult(
                 False, EXIT_RUNTIME, "stop", run_id, proj.state.value, str(exc),

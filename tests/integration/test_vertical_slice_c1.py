@@ -54,7 +54,7 @@ finally:
 # Fake-process worker that binds a real pid but NEVER completes the task.
 _IDLE_WORKER_SRC = r"""
 import time
-time.sleep(1)
+time.sleep(30)
 """
 
 
@@ -73,8 +73,13 @@ class FakeTmux:
         worker_env["PYTHONPATH"] = (
             self.hermes_src + os.pathsep + worker_env.get("PYTHONPATH", "")
         )
+        # start_new_session=True gives the worker its own process group (as a
+        # tmux pane would), so cancellation can killpg it without touching the
+        # test runner.
         proc = subprocess.Popen(
-            [sys.executable, "-c", self.worker_src], env=worker_env
+            [sys.executable, "-c", self.worker_src],
+            env=worker_env,
+            start_new_session=True,
         )
         self.procs.append(proc)
         return proc.pid
@@ -210,3 +215,53 @@ def test_c1_slice_blocks_when_worker_never_completes(
     assert res.state in ("blocked", "failed")
     col = svc.collect(res.run_id)
     assert col.data["result"]["outcome"] in ("blocked", "failed", "partial")
+
+
+def test_c1_stop_terminates_owned_worker_and_reconciles(
+    monkeypatch, tmp_path, hermes_runtime
+):
+    # Spawn one real, long-lived (idle) worker bound to a running task, then
+    # stop the run and prove the owned process group is terminated, the Kanban
+    # claim is released, and the run is cancelled — never completed.
+    import time as _t
+
+    from hca.run import RunSpec, RunState, new_run_id
+
+    cfg, state_dir = _make_env(monkeypatch, tmp_path, hermes_runtime.src_path)
+    state = StateDB(state_dir / "hca.sqlite")
+    tmux = FakeTmux(hermes_runtime.src_path, worker_src=_IDLE_WORKER_SRC)
+    orch = KanbanOrchestrator(
+        cfg, state=state, tmux=tmux, board=cfg.board,
+        enforce_sole_dispatcher=False,
+    )
+    store = RunStore(state_dir / "runs.sqlite")
+    svc = FleetService(cfg, orchestrator=orch, store=store)
+
+    spec = RunSpec(
+        run_id=new_run_id(), goal="a long-running goal",
+        board=cfg.board, created_at=_t.time(),
+    )
+    store.create_run(spec, state=RunState.QUEUED)
+    store.set_state(spec.run_id, RunState.PLANNING)
+    assert orch.plan(spec, store) == RunState.PLANNING
+    store.set_state(spec.run_id, RunState.RUNNING)
+    orch._dispatch_tick(1)  # spawn one real idle worker, leave it running
+
+    mapping = orch._mapping(store, spec.run_id)
+    work_id = mapping["child_task_ids"][0]
+    rec = state.latest_run_for_task(cfg.board, work_id)
+    assert rec is not None and rec.pid, "no worker pid was bound"
+    pid = rec.pid
+    assert orch._wait_pid_gone(pid, 0.0) is False  # worker is alive
+    assert orch._statuses([work_id])[work_id] == "running"
+
+    try:
+        res = svc.stop(spec.run_id)
+    finally:
+        tmux.cleanup()
+
+    assert res.state == "cancelled"
+    assert orch._wait_pid_gone(pid, 3.0) is True  # process group terminated
+    assert orch._statuses([work_id])[work_id] != "running"  # claim released
+    col = svc.collect(spec.run_id)
+    assert col.data["result"]["outcome"] == "cancelled"

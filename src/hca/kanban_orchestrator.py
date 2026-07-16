@@ -436,6 +436,112 @@ class KanbanOrchestrator:
             )
         return arts
 
+    # -- cancellation ------------------------------------------------------
+
+    def cancel(self, spec, store: RunStore) -> str:
+        """Stop a run: signal owned worker process groups, then reconcile.
+
+        Implements the plan's bounded cancellation: TERM the exact owned
+        process group, wait, escalate to KILL, mark the HCA run mappings
+        cancelled, and release each still-running Kanban claim to ``blocked``
+        so no task is left as a stuck running claim. Dirty work is preserved —
+        we never delete artifacts or archive the tasks here.
+        """
+        mapping = self._mapping(store, spec.run_id)
+        if not mapping:
+            return "no Kanban work to cancel"
+        board = self.board
+        child_ids = list(mapping.get("child_task_ids") or [])
+        root_id = mapping.get("root_task_id", "")
+
+        terminated = 0
+        outcomes: list[str] = []
+        for tid in child_ids + ([root_id] if root_id else []):
+            rec = self.state.latest_run_for_task(board, tid)
+            if rec and rec.pid and rec.status == "running":
+                out = self._terminate_process_group(rec.pid)
+                outcomes.append(f"{tid}:{out}")
+                if out in ("terminated", "killed"):
+                    terminated += 1
+                self.state.mark_run_status(
+                    board, rec.run_id, "cancelled", error="stopped by operator"
+                )
+
+        kb = self._kb()
+        conn = self._conn()
+        blocked = 0
+        try:
+            for tid in child_ids:
+                t = kb.get_task(conn, tid)
+                if t and getattr(t, "status", "") in ("running", "ready"):
+                    try:
+                        if kb.block_task(conn, tid, reason="run cancelled by operator"):
+                            blocked += 1
+                    except Exception:
+                        pass
+            conn.commit()
+        finally:
+            conn.close()
+
+        store.append_event(
+            spec.run_id, "run.cancel",
+            f"terminated {terminated} worker group(s), blocked {blocked} task(s)",
+            {"outcomes": outcomes},
+        )
+        return (
+            f"cancelled: terminated {terminated} worker process group(s), "
+            f"released {blocked} Kanban claim(s); partial work preserved"
+        )
+
+    def _terminate_process_group(self, pid: int, *, grace: float = 2.0) -> str:
+        """TERM the owned process group, wait, then KILL. Returns an outcome."""
+        import os
+        import signal
+
+        if not pid or pid <= 0:
+            return "no_pid"
+        try:
+            pgid = os.getpgid(pid)
+        except ProcessLookupError:
+            return "already_gone"
+        except PermissionError:
+            pgid = pid
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return "already_gone"
+        except PermissionError:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return "already_gone"
+        if self._wait_pid_gone(pid, grace):
+            return "terminated"
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return "terminated"
+        return "killed" if self._wait_pid_gone(pid, 1.0) else "escalated_kill"
+
+    @staticmethod
+    def _wait_pid_gone(pid: int, timeout: float) -> bool:
+        import os
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                return False
+            time.sleep(0.05)
+        try:
+            os.kill(pid, 0)
+            return False
+        except ProcessLookupError:
+            return True
+
     # -- projection (status/collect reconciliation) ------------------------
 
     def project(self, spec, store: RunStore) -> Optional[ExecutionEvidence]:
