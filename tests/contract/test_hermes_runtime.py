@@ -31,6 +31,40 @@ def test_dispatch_once_spawn_fn_contract():
     assert "spawn_fn" in info.dispatch_signature
 
 
+@pytest.mark.skipif(not shutil.which("hermes"), reason="hermes not on PATH")
+def test_installed_hermes_is_supported_lane():
+    """The installed Hermes must satisfy the full HCA contract surface."""
+    from hca.hermes_compat import classify_lane, probe_capabilities, provenance
+
+    caps = probe_capabilities()
+    assert caps.supported(), f"installed Hermes missing capabilities: {caps.missing()}"
+    lane, reason = classify_lane(provenance().version_line, caps)
+    # Installed baseline is the verified stable release v0.18.2.
+    assert lane in {"stable", "edge"}, reason
+    # These load-bearing seams must be present against the real module.
+    assert "current_run_id" in caps.task_fields
+    assert "claim_lock" in caps.task_fields
+    assert {"spawn_fn", "board", "max_spawn"} <= caps.dispatch_params
+
+
+@pytest.mark.skipif(not shutil.which("hermes"), reason="hermes not on PATH")
+def test_compatibility_report_is_wellformed():
+    """Report used by `hca doctor --json` — never touches a live gateway."""
+    from hca.hermes_compat import compatibility_report
+
+    # Inject a synthetic gateway probe so we do not disturb any running one.
+    report = compatibility_report(
+        "hca-test-board",
+        gateway_pid_fn=lambda: None,
+        dispatch_flag_fn=lambda: True,
+    )
+    assert report["lane"] in {"stable", "edge", "unsupported"}
+    assert "provenance" in report and report["provenance"]["semver"]
+    assert report["dispatcher_ownership"]["board"] == "hca-test-board"
+    assert report["dispatcher_ownership"]["conflict"] is False
+    assert report["subagent_hook_keys"]["correlation_key"] == "child_session_id"
+
+
 def test_worker_command_shape():
     from hca.hermes_compat import worker_command
 

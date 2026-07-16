@@ -2,7 +2,35 @@
 
 ## Unreleased
 
+### Added
+- Executable Hermes compatibility matrix: `hermes_compat` now probes the
+  installed `hermes_cli` for the exact capability surface HCA needs
+  (dispatch params, `DispatchResult`/`Task` fields, kanban/profile helpers),
+  classifies the install as `stable`/`edge`/`unsupported`, and fails closed
+  with an actionable message on drift. Reported under `compat` in
+  `hca doctor --json`; documented in `docs/upstream-compatibility.md`.
+- Sole-dispatcher detection: doctor and the dispatch tick fail closed when a
+  live Hermes gateway with `kanban.dispatch_in_gateway: true` could claim the
+  HCA board before the supervisor.
+- Typed `WorkerLaunchSpec` (`hca.worker_launch`) mirroring the upstream
+  `_default_spawn` env/argv contract (integer `current_run_id`, `TERMINAL_CWD`,
+  branch/tenant, goal-mode `-Q`, task skills, model override, profile toolsets,
+  runtime-derived terminal timeouts) with a live source drift guard.
+- Concrete-slot routing (`hca.routing`): logical roles resolve to an eligible
+  *free* concrete profile slot with pre-reservation; unknown role/requirement
+  hints are unroutable (fail visibly) instead of silently mapped to `coder`.
+
 ### Fixed
+- Dispatch is reservation-first: the spawn callback makes no admission
+  decision and **raises** rather than returning `None` after a claim (which
+  upstream records as an invisible stuck `spawned` row). Per-profile cap of 1
+  prevents duplicate workers on a concrete slot.
+- `Task.current_run_id` is mapped exactly and required (integer) before spawn.
+- `hca task swarm --workers` no longer silently ignores the flag — it fails
+  visibly (exit 2) and points at fleet-level concurrency.
+- `hca task add --repo` binds a git worktree to the real task via Hermes'
+  canonical `--workspace worktree:<path>` contract instead of a detached
+  `pending-<timestamp>` worktree the task never references.
 - `hca init` now persists the resolved fleet config; bare `hca up` / `doctor` / `watch`
   reload it instead of silently falling back to defaults (wrong socket/model)
 - Kanban spawn never respawns a busy slot (would kill the running worker and

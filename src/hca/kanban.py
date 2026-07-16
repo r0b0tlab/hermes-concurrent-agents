@@ -1,8 +1,16 @@
-"""Kanban integration: tmux-backed spawn_fn for Hermes dispatch_once."""
+"""Kanban integration: reservation-first tmux spawn_fn for dispatch_once.
+
+Dispatch order (Task 3): assert sole dispatcher → reconcile stale slots →
+pre-reserve concrete slots for ready concretely-assigned tasks → call
+upstream ``dispatch_once`` with ``max_in_progress_per_profile=1`` → the
+spawn callback launches its *pre-reserved* slot or raises → release unused
+reservations. The spawn callback makes no admission decision and never
+returns ``None`` after a claim (which upstream would record as an invisible
+stuck ``spawned`` row).
+"""
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import time
 from pathlib import Path
@@ -11,13 +19,15 @@ from typing import Any, Optional
 from hca.config import FleetConfig
 from hca.hermes_compat import (
     assert_dispatch_contract,
+    assert_sole_dispatcher,
     import_kanban_db,
-    worker_command,
 )
 from hca.logs import log_path
 from hca.observe import slot_name
+from hca.routing import Reservations, concrete_slots
 from hca.state import RunRecord, StateDB
 from hca.tmux import TmuxManager, sanitize_session_name
+from hca.worker_launch import WorkerLaunchError, build_worker_launch_spec
 
 
 def _open_kanban_conn(board: Optional[str] = None) -> sqlite3.Connection:
@@ -28,19 +38,22 @@ def _open_kanban_conn(board: Optional[str] = None) -> sqlite3.Connection:
     return conn
 
 
+def _concrete_profiles(cfg: FleetConfig) -> set[str]:
+    return {s.profile for s in concrete_slots(cfg)}
+
+
 def pick_idle_slot(
     cfg: FleetConfig,
     state: StateDB,
     role_cursors: dict[str, int],
     assignee: str,
 ) -> Optional[str]:
-    """Round-robin an idle slot for the assignee's role; None if all are busy.
+    """Round-robin an idle concrete slot matching the assignee's role.
 
-    Never returns a slot with a live run: respawning a busy pane would kill the
-    worker running in it.
+    Kept for status/diagnostics and back-compat; the dispatch path now uses
+    reservation-based routing. Never returns a slot with a live run.
     """
-    # assignee may be profile name like coder-worker or hca-fleet-coder-01
-    role = _role_from_assignee(assignee)
+    role = _role_from_profile(assignee)
     n = int(cfg.profile_slots.get(role, 1) or 1)
     busy = {r.slot for r in state.list_runs(status="running")}
     cur = role_cursors.get(role, 0)
@@ -53,80 +66,125 @@ def pick_idle_slot(
     return None
 
 
-def make_tmux_spawn_fn(cfg: FleetConfig, state: StateDB, tmux: TmuxManager):
-    """Return spawn_fn(task, workspace, board=None) -> pid for Hermes dispatcher."""
+def _role_from_profile(profile: str) -> str:
+    """Extract the concrete slot role from a concrete profile name.
 
-    role_cursors: dict[str, int] = {}
+    Only used for slot bookkeeping of *concrete* ``hca-<fleet>-<role>-NN``
+    profiles. It is NOT a logical-role fallback: unknown logical assignees
+    are rejected by hca.routing, not silently mapped to coder.
+    """
+    a = (profile or "").lower()
+    for key in ("orchestrator", "coder", "research", "qa", "creative"):
+        if f"-{key}-" in a or a.endswith(f"-{key}"):
+            return key
+    # For a concrete slot we could not classify, default the *slot count*
+    # lookup to coder; this does not route work, only sizes the pool.
+    return "coder"
 
-    def spawn_fn(task, workspace: str, board: Optional[str] = None) -> Optional[int]:
+
+def pre_reserve_ready(
+    cfg: FleetConfig,
+    state: StateDB,
+    conn: sqlite3.Connection,
+    reservations: Reservations,
+    *,
+    limit: int,
+) -> list[str]:
+    """Reserve concrete slots for ready, concretely-assigned free tasks.
+
+    Returns the reserved profile names. Only tasks already assigned to an
+    existing HCA concrete profile are reserved here; logical-role tasks are
+    resolved to concrete profiles at creation time by the service layer.
+    """
+    concrete = _concrete_profiles(cfg)
+    reserved: list[str] = []
+    try:
+        rows = conn.execute(
+            "SELECT id, assignee FROM tasks "
+            "WHERE status = 'ready' AND claim_lock IS NULL "
+            "ORDER BY priority DESC, created_at ASC"
+        ).fetchall()
+    except sqlite3.Error:
+        return reserved
+    busy = reservations.busy(state)
+    for row in rows:
+        if len(reserved) >= limit:
+            break
+        assignee = (row["assignee"] or "") if isinstance(row, sqlite3.Row) else ""
+        if assignee in concrete and assignee not in busy:
+            reservations.reserve(assignee)
+            busy.add(assignee)
+            reserved.append(assignee)
+    return reserved
+
+
+def make_tmux_spawn_fn(
+    cfg: FleetConfig,
+    state: StateDB,
+    tmux: TmuxManager,
+    reservations: Reservations,
+):
+    """Return spawn_fn(task, workspace, board=None) -> int (never None).
+
+    The callback has no admission decision left: it confirms the task's
+    concrete profile was pre-reserved this tick, builds the exact worker
+    launch spec, launches the reserved slot, and returns a real PID. If it
+    cannot proceed it *raises* (upstream then auto-blocks the task) — it
+    must never return None, which upstream records as a stuck spawned row.
+    """
+
+    def spawn_fn(task, workspace: str, board: Optional[str] = None) -> int:
         board = board or cfg.board
         assignee = getattr(task, "assignee", None) or ""
         task_id = getattr(task, "id", "") or ""
-        run_id = getattr(task, "run_id", None) or f"run-{task_id}-{int(time.time())}"
-        # Hermes may set active_run_id on task after claim — try common attrs
-        for attr in ("active_run_id", "run_id", "claim_run_id"):
-            v = getattr(task, attr, None)
-            if v:
-                run_id = str(v)
-                break
 
-        slot = pick_idle_slot(cfg, state, role_cursors, assignee)
-        if slot is None:
-            state.set_activity(
-                kind="admission.wait",
-                message=f"no idle {_role_from_assignee(assignee)} slot for {task_id}; task stays queued",
-                board=str(board),
-                task_id=str(task_id),
+        if not assignee:
+            raise WorkerLaunchError(f"task {task_id} has no concrete assignee")
+        if assignee not in reservations.reserved:
+            # No admission decision here: a task reaching spawn without a
+            # reservation is a routing/reservation bug. Raise so upstream
+            # blocks it visibly rather than leaving an invisible claim.
+            raise WorkerLaunchError(
+                f"task {task_id} assignee {assignee!r} was not pre-reserved "
+                "this tick — refusing to spawn (would leak an unadmitted worker)"
             )
-            return None
-        # Defensive: a stale 'running' row on this slot (crash before reconcile)
-        # would violate the live-slot unique index on insert.
+
+        slot = sanitize_session_name(assignee)
+
+        # Defensive: a stale 'running' row on this slot (crash before
+        # reconcile) violates the live-slot unique index on insert.
         for stale in state.list_runs(status="running"):
             if stale.slot == slot:
                 state.mark_run_status(
                     stale.board, stale.run_id, "superseded", error="slot reused by new spawn"
                 )
-        # Prefer concrete profile if assignee looks like a profile
-        profile = assignee if assignee.startswith("hca-") else f"hca-{cfg.name}-{_role_from_assignee(assignee)}-01"
-        # If assignee is already a full profile name from hermes, use it
-        if assignee and not assignee.startswith("hca-") and Path(
-            os.path.expanduser(f"~/.hermes/profiles/{assignee}")
-        ).is_dir():
-            profile = assignee
 
-        kb = import_kanban_db()
-        kanban_db = str(kb.kanban_db_path(board=board))
-        workspaces_root = str(Path(workspace).expanduser().resolve().parent)
-
-        # HERMES_HOME stays untouched: it is the ~/.hermes config root, and the
-        # worker is addressed by profile via `hermes -p <profile>`.
-        env = {
-            "HERMES_PROFILE": profile,
-            "HERMES_KANBAN_TASK": str(task_id),
-            "HERMES_KANBAN_RUN_ID": str(run_id),
-            "HERMES_KANBAN_CLAIM_LOCK": str(getattr(task, "claim_lock", "") or ""),
-            "HERMES_KANBAN_BOARD": str(board),
-            "HERMES_KANBAN_DB": kanban_db,
-            "HERMES_KANBAN_WORKSPACE": str(workspace),
-            "HERMES_KANBAN_WORKSPACES_ROOT": workspaces_root,
+        extra_env = {
             "HCA_STATE_DB": str(Path(cfg.state_dir) / "hca.sqlite"),
             "HCA_MAX_SUBAGENT_CREDITS": str(cfg.delegation_max_children),
         }
-        # claim lock may live on task object under different names
-        for attr in ("claim_lock", "lock_token", "worker_lock"):
-            v = getattr(task, attr, None)
-            if v:
-                env["HERMES_KANBAN_CLAIM_LOCK"] = str(v)
+        # build_worker_launch_spec fails closed unless current_run_id is an
+        # integer — so a missing run id raises here, before any tmux launch.
+        spec = build_worker_launch_spec(
+            task, str(workspace or ""), board=board, profile=assignee,
+            hca_extra_env=extra_env,
+        )
+        run_id = spec.run_id
 
-        cmd = worker_command(profile, str(task_id), yolo=cfg.approvals_yolo)
         pid = tmux.run_in_slot(
             slot,
-            cmd,
-            env=env,
+            spec.command(),
+            env=spec.env(),
             workdir=str(workspace) if workspace else None,
             log_path=str(log_path(cfg.state_dir, str(run_id))),
         )
+        if not pid:
+            raise WorkerLaunchError(
+                f"tmux returned no pid for task {task_id} on slot {slot}"
+            )
+
         now = time.time()
+        session_id = getattr(task, "session_id", None)
         state.upsert_run(
             RunRecord(
                 board=str(board),
@@ -134,9 +192,9 @@ def make_tmux_spawn_fn(cfg: FleetConfig, state: StateDB, tmux: TmuxManager):
                 run_id=str(run_id),
                 slot=slot,
                 node="local",
-                tmux_session=sanitize_session_name(slot),
+                tmux_session=slot,
                 pid=pid,
-                hermes_session_id=None,
+                hermes_session_id=str(session_id) if session_id else None,
                 workspace=str(workspace) if workspace else None,
                 status="running",
                 started_at=now,
@@ -147,7 +205,7 @@ def make_tmux_spawn_fn(cfg: FleetConfig, state: StateDB, tmux: TmuxManager):
         )
         state.set_activity(
             kind="run.start",
-            message=f"spawned {task_id} on {slot} pid={pid}",
+            message=f"spawned {task_id} on {slot} pid={pid} run={run_id}",
             board=str(board),
             task_id=str(task_id),
             run_id=str(run_id),
@@ -158,39 +216,73 @@ def make_tmux_spawn_fn(cfg: FleetConfig, state: StateDB, tmux: TmuxManager):
     return spawn_fn
 
 
-def _role_from_assignee(assignee: str) -> str:
-    a = (assignee or "").lower()
-    for key in ("orchestrator", "coder", "research", "qa", "creative"):
-        if key in a:
-            return key
-    return "coder"
+def _result_to_dict(result: Any) -> dict[str, Any]:
+    """Surface the full upstream DispatchResult, tolerating field drift."""
+
+    def g(name, default):
+        v = getattr(result, name, default)
+        return list(v) if isinstance(v, (list, tuple)) else v
+
+    return {
+        "reclaimed": g("reclaimed", 0),
+        "promoted": g("promoted", 0),
+        "spawned": g("spawned", []),
+        "skipped_unassigned": g("skipped_unassigned", []),
+        "auto_assigned_default": g("auto_assigned_default", []),
+        "skipped_nonspawnable": g("skipped_nonspawnable", []),
+        "skipped_per_profile_capped": g("skipped_per_profile_capped", []),
+        "crashed": g("crashed", []),
+        "auto_blocked": g("auto_blocked", []),
+        "timed_out": g("timed_out", []),
+        "stale": g("stale", []),
+        "respawn_guarded": g("respawn_guarded", []),
+        "rate_limited": g("rate_limited", []),
+        "skipped_locked": bool(getattr(result, "skipped_locked", False)),
+    }
 
 
-def dispatch_tick(cfg: FleetConfig, state: StateDB, tmux: TmuxManager, **kwargs) -> dict[str, Any]:
-    """One Hermes dispatcher tick with HCA tmux spawn_fn."""
+def dispatch_tick(
+    cfg: FleetConfig, state: StateDB, tmux: TmuxManager, **kwargs
+) -> dict[str, Any]:
+    """One reservation-first Hermes dispatcher tick with the HCA spawn_fn."""
     assert_dispatch_contract()
+    # Fail closed before any claim/spawn if a foreign gateway can own the board.
+    if not kwargs.get("skip_sole_dispatcher_check"):
+        assert_sole_dispatcher(cfg.board)
     kb = import_kanban_db()
     conn = _open_kanban_conn(cfg.board)
     try:
-        spawn_fn = make_tmux_spawn_fn(cfg, state, tmux)
+        wave = int(kwargs.get("max_spawn", cfg.capacity.max_wave_size))
+        reservations = Reservations()
+        # dispatch_once promotes todo/blocked → ready *internally*; run the
+        # same idempotent promotion first so HCA can see and pre-reserve the
+        # tasks the tick is about to spawn.
+        recompute = getattr(kb, "recompute_ready", None)
+        if callable(recompute):
+            try:
+                recompute(conn)
+            except Exception:
+                pass
+        pre_reserve_ready(cfg, state, conn, reservations, limit=wave)
+        spawn_fn = make_tmux_spawn_fn(cfg, state, tmux, reservations)
         result = kb.dispatch_once(
             conn,
             spawn_fn=spawn_fn,
             board=cfg.board,
-            max_spawn=kwargs.get("max_spawn", cfg.capacity.max_wave_size),
+            max_spawn=wave,
             max_in_progress=kwargs.get(
                 "max_in_progress", cfg.capacity.max_top_level_runs
             ),
+            max_in_progress_per_profile=kwargs.get("max_in_progress_per_profile", 1),
             dry_run=kwargs.get("dry_run", False),
         )
-        return {
-            "reclaimed": result.reclaimed,
-            "promoted": result.promoted,
-            "spawned": list(result.spawned),
-            "skipped_unassigned": list(result.skipped_unassigned),
-            "skipped_nonspawnable": list(result.skipped_nonspawnable),
-            "crashed": list(result.crashed),
-            "skipped_locked": bool(result.skipped_locked),
+        # Release reservations that did not bind to a spawned run.
+        spawned_profiles = {
+            entry[1] for entry in getattr(result, "spawned", []) if len(entry) > 1
         }
+        for profile in list(reservations.reserved):
+            if profile not in spawned_profiles:
+                reservations.release(profile)
+        return _result_to_dict(result)
     finally:
         conn.close()

@@ -10,7 +10,12 @@ from typing import Any
 
 from hca.backends import openai_compat as oai
 from hca.config import FleetConfig
-from hca.hermes_compat import HermesCompatError, assert_dispatch_contract, hermes_version
+from hca.hermes_compat import (
+    HermesCompatError,
+    assert_dispatch_contract,
+    compatibility_report,
+    hermes_version,
+)
 from hca.resources import fetch_capacity
 from hca.ssh_exec import run_ssh
 from hca.tmux import TmuxManager
@@ -31,9 +36,14 @@ class Check:
 class DoctorReport:
     ok: bool
     checks: list[Check] = field(default_factory=list)
+    compat: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"ok": self.ok, "checks": [c.to_dict() for c in self.checks]}
+        return {
+            "ok": self.ok,
+            "checks": [c.to_dict() for c in self.checks],
+            "compat": self.compat,
+        }
 
 
 def _add(checks: list[Check], name: str, ok: bool, detail: str, severity: str = "error") -> None:
@@ -61,6 +71,38 @@ def run_doctor(cfg: FleetConfig, *, tools_probe: bool = False) -> DoctorReport:
         )
     except HermesCompatError as exc:
         _add(checks, "hermes.dispatch_once", False, str(exc))
+
+    # Normalized compatibility report: lane classification + sole-dispatcher
+    # ownership. Surfaced under `compat` in `hca doctor --json`. The gateway
+    # probe here uses the real live-gateway seam, so a foreign dispatcher on
+    # our board fails closed before any task is created.
+    compat: dict[str, Any] = {}
+    try:
+        compat = compatibility_report(cfg.board)
+    except Exception as exc:  # never let the report crash doctor
+        compat = {"lane": "unknown", "lane_reason": f"report failed: {exc}"}
+    lane = compat.get("lane", "unknown")
+    if lane == "unsupported":
+        _add(checks, "hermes.lane", False, compat.get("lane_reason", "unsupported"))
+    elif lane == "edge":
+        _add(checks, "hermes.lane", True, f"edge: {compat.get('lane_reason', '')}", "warn")
+    elif lane == "stable":
+        _add(checks, "hermes.lane", True, compat.get("lane_reason", "stable"), "info")
+    else:
+        _add(checks, "hermes.lane", False, compat.get("lane_reason", "unknown lane"))
+
+    own = compat.get("dispatcher_ownership") or {}
+    if own:
+        if own.get("conflict"):
+            _add(checks, "hermes.sole_dispatcher", False, own.get("reason", "dispatcher conflict"))
+        else:
+            _add(
+                checks,
+                "hermes.sole_dispatcher",
+                True,
+                own.get("reason", "HCA is sole dispatcher"),
+                "info",
+            )
 
     # tmux
     tmux = shutil.which("tmux")
@@ -154,4 +196,4 @@ def run_doctor(cfg: FleetConfig, *, tools_probe: bool = False) -> DoctorReport:
         )
 
     fatal = [c for c in checks if not c.ok and c.severity == "error"]
-    return DoctorReport(ok=not fatal, checks=checks)
+    return DoctorReport(ok=not fatal, checks=checks, compat=compat)

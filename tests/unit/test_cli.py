@@ -17,3 +17,12 @@ def test_redact():
 
 def test_main_presets_exit_zero():
     assert main(["presets"]) == 0
+
+
+def test_task_swarm_workers_is_rejected_not_ignored(capsys):
+    # --workers must fail visibly (exit 2), never be silently ignored.
+    rc = main(["task", "swarm", "do a thing", "--workers", "8"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "not supported" in err
+    assert "--workers" in err

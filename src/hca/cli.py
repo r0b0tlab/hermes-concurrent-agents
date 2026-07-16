@@ -25,7 +25,6 @@ from hca.state import StateDB
 from hca.supervisor import Supervisor
 from hca.tmux import TmuxManager, sanitize_session_name
 from hca.transcript import fetch_transcript, resolve_run
-from hca.workspaces import ensure_worktree, mode_for_role
 
 
 def _print(data: Any, as_json: bool = False) -> None:
@@ -442,20 +441,12 @@ def cmd_task(args) -> int:
             cmd += ["--assignee", args.assignee]
         if args.goal:
             cmd += ["--goal"] if _supports_goal() else []
-        # workspace prep
+        # Workspace: bind a git worktree to the *real* task id via Hermes'
+        # canonical --workspace contract rather than pre-creating a detached
+        # HCA `pending-<timestamp>` worktree the task never references.
         if args.repo:
-            role = getattr(args, "task_role", None) or "coder"
-            # create placeholder worktree path for later spawn
-            ws = ensure_worktree(
-                repo=args.repo,
-                task_id=f"pending-{int(time.time())}",
-                role=role,
-                state_dir=cfg.state_dir,
-                fleet=cfg.name,
-                mode=mode_for_role(role),
-            )
-            if not args.json:
-                print(f"workspace prepared: {ws.path} mode={ws.mode}")
+            repo_path = os.path.abspath(os.path.expanduser(args.repo))
+            cmd += ["--workspace", f"worktree:{repo_path}"]
         proc = run_hermes(*cmd)
         if args.json:
             _print({"rc": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, True)
@@ -464,10 +455,19 @@ def cmd_task(args) -> int:
             sys.stderr.write(proc.stderr)
         return proc.returncode
     if args.task_cmd == "swarm":
-        cmd = ["kanban", "swarm", args.title, "--board", cfg.board]
         if args.workers:
-            # hermes swarm flags vary; pass through generically if present
-            pass
+            # Never silently ignore a concurrency request. HCA admits useful
+            # concurrency itself via the run/supervisor; there is no per-task
+            # worker fan-out flag on this surface.
+            print(
+                "error: `hca task swarm --workers` is not supported — HCA "
+                "admits concurrency at the fleet/run level. Submit work with "
+                "`hca run \"<goal>\"` (planner expands to admitted concurrency) "
+                "or create independent tasks; remove --workers.",
+                file=sys.stderr,
+            )
+            return 2
+        cmd = ["kanban", "swarm", args.title, "--board", cfg.board]
         proc = run_hermes(*cmd)
         if args.json:
             _print({"rc": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, True)
