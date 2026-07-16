@@ -7,6 +7,7 @@ import shutil
 import stat
 
 import pytest
+import yaml
 
 from hca.config import load_fleet_config
 from hca.profiles import init_profiles
@@ -14,7 +15,9 @@ from hca.profiles import init_profiles
 pytestmark = pytest.mark.skipif(not shutil.which("hermes"), reason="hermes CLI missing")
 
 
-def test_init_clones_real_profile_then_applies_scoped_overrides(monkeypatch, tmp_path):
+def test_init_clones_real_profile_then_applies_scoped_overrides(
+    monkeypatch, tmp_path, hermes_runtime
+):
     home = tmp_path / "hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -48,9 +51,19 @@ def test_init_clones_real_profile_then_applies_scoped_overrides(monkeypatch, tmp
 
     dst = home / "profiles" / "hca-live-coder-01"
     config = (dst / "config.yaml").read_text(encoding="utf-8")
+    parsed = yaml.safe_load(config)
     assert "provider: openrouter" in config
     assert "default: example/source-model" in config
-    assert "petdex" in config and "hca" in config
+    assert parsed["plugins"]["enabled"] == []
+    assert parsed["platform_toolsets"]["cli"] == [
+        "terminal",
+        "file",
+        "kanban",
+    ]
+    assert all(isinstance(value, str) for value in parsed["platform_toolsets"]["cli"])
+    assert parsed["command_allowlist"] == []
+    resolved_toolsets = hermes_runtime.kb._resolve_worker_cli_toolsets(str(dst))
+    assert resolved_toolsets == ["file", "kanban", "terminal"]
     assert "dispatch_in_gateway: false" in config
     assert "subagent_auto_approve: false" in config
     assert "hooks_auto_accept: false" in config

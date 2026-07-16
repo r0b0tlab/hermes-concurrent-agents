@@ -7,7 +7,8 @@ profile* through the current ``hermes profile create`` API, then tightened via
   * preserves source model/provider/fallback configuration and lets Hermes clone
     the source's owner-only credential file — no credential value is passed in
     an HCA command, log, manifest, or generated config;
-  * explicitly enables the pip plugin ``hca`` (Hermes plugins are opt-in);
+  * disables optional plugins in worker slots so plugin toolsets cannot bypass
+    the role allowlist (the HCA team plugin belongs in the user/control profile);
   * makes HCA the sole dispatcher (``kanban.dispatch_in_gateway: false``);
   * disables worker delegation by default (``max_concurrent_children: 0``,
     ``max_spawn_depth: 1``, ``orchestrator_enabled: false``) so durable
@@ -33,20 +34,31 @@ from hca.config import PACKAGE_DIR, FleetConfig
 
 ROLE_TEMPLATES = {
     "orchestrator": "orchestrator",
+    "general": "general-worker",
     "coder": "coder-worker",
     "research": "research-worker",
     "qa": "qa-worker",
     "creative": "creative-worker",
 }
 
-# Ordinary work toolsets preserved for every HCA role (kanban is task-scoped at
-# launch via HERMES_KANBAN_TASK). The top-level `toolsets` key is deprecated
-# upstream; tool config is per-platform under `platform_toolsets.cli`.
-BASE_WORKER_TOOLSETS = ("terminal", "web", "file", "skills", "todo", "memory", "kanban")
+# Role-scoped ordinary work tools. Task lifecycle tools are additionally pinned
+# by HERMES_KANBAN_TASK, but keeping ``kanban`` explicit makes the generated
+# profile self-describing. Worker profiles never receive memory, messaging,
+# cron, delegation, fleet, account, browser/computer-use, or other unrelated
+# operator surfaces.
+ROLE_TOOLSETS = {
+    "orchestrator": ("kanban",),
+    "general": ("terminal", "file", "kanban"),
+    "coder": ("terminal", "file", "kanban"),
+    "research": ("web", "file", "kanban"),
+    "qa": ("terminal", "file", "kanban"),
+    "creative": ("file", "image_gen", "kanban"),
+}
+DEFAULT_WORKER_TOOLSETS = ("file", "kanban")
 
-# Operator / fleet / messaging / delegation powers filtered out of worker and
-# reviewer profiles. A worker must not be able to drain or reconfigure a fleet,
-# message channels, schedule cron automation, or spawn its own subagents.
+# Operator / fleet / messaging / delegation powers filtered out of every HCA
+# profile. A worker must not be able to drain or reconfigure a fleet, message
+# channels, schedule cron automation, or spawn its own subagents.
 OPERATOR_TOOLSETS = ("messaging", "cronjob", "delegation", "fleet", "account")
 
 
@@ -90,11 +102,8 @@ def iter_slot_profiles(cfg: FleetConfig) -> Iterable[tuple[str, str, int, str]]:
 
 
 def role_toolsets(role: str) -> list[str]:
-    """The CLI toolsets a role's workers may use (least privilege)."""
-    # Every HCA role gets ordinary work tools; none get operator/messaging/
-    # delegation. The planner (orchestrator) keeps kanban to create/link tasks;
-    # workers keep kanban but it is task-scoped by the launch env.
-    return list(BASE_WORKER_TOOLSETS)
+    """Return a concrete role's least-privilege CLI toolsets."""
+    return list(ROLE_TOOLSETS.get((role or "").lower(), DEFAULT_WORKER_TOOLSETS))
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +184,137 @@ def _nested_string_list(config_text: str, section: str, key: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _write_yaml_string_list(
+    config_path: Path,
+    section: str,
+    key: str,
+    values: Iterable[str],
+) -> None:
+    """Persist one controlled YAML sequence without coercing it to a string.
+
+    Hermes ``config set`` intentionally coerces booleans/numbers but does not
+    parse sequence literals. Passing JSON therefore writes a string that looks
+    like a list; Hermes then falls back to the broad ``hermes-cli`` toolset.
+    Keep scalar mutations on the authoritative CLI and patch only these two
+    controlled string-list fields before running ``config check``.
+    """
+    clean_values = [str(value) for value in values if str(value)]
+    text = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
+    lines = text.splitlines()
+    section_index: Optional[int] = None
+    section_indent = 0
+    for index, raw in enumerate(lines):
+        clean = raw.split("#", 1)[0].rstrip()
+        if clean.strip() == f"{section}:":
+            indent = len(clean) - len(clean.lstrip())
+            if indent == 0:
+                section_index = index
+                section_indent = indent
+                break
+
+    if section_index is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        section_index = len(lines)
+        lines.append(f"{section}:")
+
+    section_end = len(lines)
+    for index in range(section_index + 1, len(lines)):
+        clean = lines[index].split("#", 1)[0].rstrip()
+        if not clean.strip():
+            continue
+        indent = len(clean) - len(clean.lstrip())
+        if indent <= section_indent:
+            section_end = index
+            break
+
+    key_index: Optional[int] = None
+    key_indent = section_indent + 2
+    for index in range(section_index + 1, section_end):
+        clean = lines[index].split("#", 1)[0].rstrip()
+        if not clean.strip():
+            continue
+        indent = len(clean) - len(clean.lstrip())
+        if indent == key_indent and clean.strip().startswith(f"{key}:"):
+            key_index = index
+            break
+
+    if clean_values:
+        block = [" " * key_indent + f"{key}:"] + [
+            " " * (key_indent + 2) + f"- {json.dumps(value)}"
+            for value in clean_values
+        ]
+    else:
+        block = [" " * key_indent + f"{key}: []"]
+    if key_index is None:
+        lines[section_end:section_end] = block
+    else:
+        key_end = key_index + 1
+        while key_end < section_end:
+            clean = lines[key_end].split("#", 1)[0].rstrip()
+            if clean.strip():
+                indent = len(clean) - len(clean.lstrip())
+                if indent <= key_indent:
+                    break
+            key_end += 1
+        lines[key_index:key_end] = block
+
+    rendered = "\n".join(lines).rstrip() + "\n"
+    temp = config_path.with_name(f".{config_path.name}.hca-list-{time.time_ns()}")
+    try:
+        temp.write_text(rendered, encoding="utf-8")
+        temp.chmod(0o600)
+        os.replace(temp, config_path)
+        config_path.chmod(0o600)
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
+def _write_yaml_top_level_string_list(
+    config_path: Path,
+    key: str,
+    values: Iterable[str],
+) -> None:
+    """Persist one top-level controlled YAML string sequence."""
+    clean_values = [str(value) for value in values if str(value)]
+    text = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
+    lines = text.splitlines()
+    key_index: Optional[int] = None
+    for index, raw in enumerate(lines):
+        clean = raw.split("#", 1)[0].rstrip()
+        if clean and not clean.startswith((" ", "\t")) and clean.startswith(f"{key}:"):
+            key_index = index
+            break
+    if clean_values:
+        block = [f"{key}:"] + [f"  - {json.dumps(value)}" for value in clean_values]
+    else:
+        block = [f"{key}: []"]
+    if key_index is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend(block)
+    else:
+        key_end = key_index + 1
+        while key_end < len(lines):
+            clean = lines[key_end].split("#", 1)[0].rstrip()
+            if clean.strip() and not clean.startswith((" ", "\t")):
+                break
+            key_end += 1
+        lines[key_index:key_end] = block
+
+    rendered = "\n".join(lines).rstrip() + "\n"
+    temp = config_path.with_name(f".{config_path.name}.hca-list-{time.time_ns()}")
+    try:
+        temp.write_text(rendered, encoding="utf-8")
+        temp.chmod(0o600)
+        os.replace(temp, config_path)
+        config_path.chmod(0o600)
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
 def _command_failure(result: object, action: str) -> ProfileDerivationError:
     rc = getattr(result, "returncode", "?")
     stderr = str(getattr(result, "stderr", "") or "").strip()
@@ -193,27 +333,24 @@ def _configure_profile(
     runner: Callable[..., object],
 ) -> None:
     """Tighten a cloned profile through Hermes' authoritative config CLI."""
-    text = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
-    plugins = _nested_string_list(text, "plugins", "enabled")
-    if "hca" not in plugins:
-        plugins.append("hca")
-
     operations: tuple[tuple[str, str], ...] = (
-        ("plugins.enabled", json.dumps(sorted(set(plugins)))),
         ("kanban.dispatch_in_gateway", "false"),
         ("delegation.max_concurrent_children", str(max(0, cfg.delegation_max_children))),
         ("delegation.max_spawn_depth", "1"),
         ("delegation.orchestrator_enabled", "false"),
         ("delegation.subagent_auto_approve", "false"),
-        ("platform_toolsets.cli", json.dumps(role_toolsets(role))),
         ("approvals.mode", "manual"),
         ("hooks_auto_accept", "false"),
-        ("command_allowlist", "[]"),
     )
     for key, value in operations:
         result = runner("-p", profile, "config", "set", key, value)
         if int(getattr(result, "returncode", 1)) != 0:
             raise _command_failure(result, f"hermes -p {profile} config set {key}")
+    _write_yaml_string_list(config_path, "plugins", "enabled", ())
+    _write_yaml_string_list(
+        config_path, "platform_toolsets", "cli", role_toolsets(role)
+    )
+    _write_yaml_top_level_string_list(config_path, "command_allowlist", ())
     checked = runner("-p", profile, "config", "check")
     if int(getattr(checked, "returncode", 1)) != 0:
         raise _command_failure(checked, f"hermes -p {profile} config check")

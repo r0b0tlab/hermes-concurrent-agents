@@ -118,6 +118,7 @@ class FleetConfig:
     profile_slots: dict[str, int] = field(
         default_factory=lambda: {
             "orchestrator": 1,
+            "general": 2,
             "coder": 2,
             "research": 2,
             "qa": 1,

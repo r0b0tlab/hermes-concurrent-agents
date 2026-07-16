@@ -57,8 +57,8 @@ ROLE_ALIASES: dict[str, str] = {
     "documentation": "creative",
     "writing": "creative",
     "creative": "creative",
-    "worker": "",  # any execution worker
-    "general": "",
+    "worker": "",  # any execution worker; defaults put general slots first
+    "general": "general",
 }
 
 

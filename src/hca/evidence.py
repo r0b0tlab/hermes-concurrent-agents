@@ -86,6 +86,7 @@ class ExecutionEvidence:
 
     root_task_id: str = ""
     tasks: list[TaskEvidence] = field(default_factory=list)
+    live_worker_task_ids: list[str] = field(default_factory=list)
     reason: str = ""
 
     def root(self) -> Optional[TaskEvidence]:
@@ -104,6 +105,7 @@ class ExecutionEvidence:
         return {
             "root_task_id": self.root_task_id,
             "tasks": [t.to_dict() for t in self.tasks],
+            "live_worker_task_ids": list(self.live_worker_task_ids),
             "reason": self.reason,
         }
 
@@ -140,6 +142,27 @@ def derive_final_state(
             ev.reason or "no upstream Kanban tasks were created for this run"
         )
 
+    # A bounded synchronous observation window is authoritative. It may expire
+    # while an owned worker is still supervised; return a non-success BLOCKED
+    # projection with the explicit budget reason rather than extending `run`
+    # indefinitely. Exact ownership remains visible for later status/stop.
+    non_terminal = [
+        t for t in ev.tasks if t.terminal_status not in TERMINAL_TASK_STATUSES
+    ]
+    if ev.reason.startswith("execution observation window exhausted") and non_terminal:
+        return RunState.BLOCKED, ev.reason
+
+    # Every projected terminal/holding state must wait for exact owned worker
+    # cleanup. Kanban truth can become done, blocked, or failed before the
+    # Hermes process has actually exited; exposing NEEDS_INPUT/FAILED/COMPLETED
+    # early would strand a live lease behind an apparently settled run.
+    if ev.live_worker_task_ids:
+        ids = ", ".join(ev.live_worker_task_ids[:5])
+        return RunState.RUNNING, (
+            f"{len(ev.live_worker_task_ids)} owned worker(s) still exiting "
+            f"({ids}) — waiting for exact process cleanup"
+        )
+
     fatal = [t for t in ev.tasks if t.terminal_status in FATAL_TASK_STATUSES]
     if fatal:
         t = fatal[0]
@@ -171,9 +194,6 @@ def derive_final_state(
             ev.reason or f"{len(blocked)} task(s) blocked; {t.task_id} needs attention"
         )
 
-    non_terminal = [
-        t for t in ev.tasks if t.terminal_status not in TERMINAL_TASK_STATUSES
-    ]
     if non_terminal:
         ids = ", ".join(t.task_id for t in non_terminal[:5])
         if ev.reason:

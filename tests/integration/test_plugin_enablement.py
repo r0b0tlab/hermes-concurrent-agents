@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,16 @@ class ExactHermesContext:
             "handler": handler,
             "description": description,
         }
+
+
+def test_pip_entrypoint_loads_a_module_with_register():
+    project = Path(__file__).resolve().parents[2]
+    metadata = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8"))
+    reference = metadata["project"]["entry-points"]["hermes_agent.plugins"]["hca"]
+    # Hermes PluginManager calls ep.load(), then getattr(loaded, "register").
+    assert ":" not in reference
+    loaded = importlib.import_module(reference)
+    assert callable(getattr(loaded, "register", None))
 
 
 def test_register_exposes_exact_five_tools_with_provider_safe_schemas():

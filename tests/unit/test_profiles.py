@@ -13,6 +13,7 @@ from hca.profiles import (
     _nested_string_list,
     hermes_profiles_root,
     init_profiles,
+    role_toolsets,
     source_defines_yolo,
 )
 
@@ -43,6 +44,31 @@ def test_nested_plugin_list_supports_block_and_inline_forms():
 )
 def test_approval_bypass_sources_are_rejected(text):
     assert source_defines_yolo(text)
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [
+        ("orchestrator", ["kanban"]),
+        ("general", ["terminal", "file", "kanban"]),
+        ("coder", ["terminal", "file", "kanban"]),
+        ("research", ["web", "file", "kanban"]),
+        ("qa", ["terminal", "file", "kanban"]),
+        ("creative", ["file", "image_gen", "kanban"]),
+        ("unknown", ["file", "kanban"]),
+    ],
+)
+def test_role_toolsets_are_explicit_and_least_privilege(role, expected):
+    actual = role_toolsets(role)
+    assert actual == expected
+    assert not {
+        "skills",
+        "memory",
+        "messaging",
+        "cronjob",
+        "delegation",
+        "fleet",
+    } & set(actual)
 
 
 def test_failed_profile_tightening_restores_original_config(monkeypatch, tmp_path):

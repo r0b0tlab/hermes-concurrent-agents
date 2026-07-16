@@ -23,6 +23,7 @@ max_wave_size = 2
 
 [profiles.slots]
 orchestrator = 1
+general = 1
 coder = 1
 research = 1
 qa = 1

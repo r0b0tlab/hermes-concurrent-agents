@@ -30,6 +30,7 @@ def test_concrete_slots_have_stable_identity(tmp_path):
 
 
 def test_resolve_known_and_unknown_hints():
+    assert resolve_role_hint("general") == ("general", None)
     assert resolve_role_hint("coding") == ("coder", None)
     assert resolve_role_hint("research") == ("research", None)
     role, err = resolve_role_hint("wizardry")
@@ -37,6 +38,14 @@ def test_resolve_known_and_unknown_hints():
     # None / empty → any worker
     assert resolve_role_hint(None) == ("", None)
     assert resolve_role_hint("  ") == ("", None)
+
+
+def test_default_unhinted_work_uses_general_pool_first(tmp_path):
+    cfg = _cfg(tmp_path)
+    state = StateDB(tmp_path / "hca.sqlite")
+    out = route_task(cfg, state, Reservations(), task_id="t-general")
+    assert not isinstance(out, Unroutable)
+    assert out.profile.startswith(f"hca-{cfg.name}-general-")
 
 
 def test_unknown_role_is_unroutable_not_coder(tmp_path):

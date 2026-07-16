@@ -45,14 +45,23 @@ from hca.evidence import (
     TaskEvidence,
     review_required,
 )
-from hca.hermes_compat import HermesCompatError, import_kanban_db
+from hca.hermes_compat import (
+    HermesCompatError,
+    assert_sole_dispatcher,
+    import_kanban_db,
+)
 from hca.process_identity import (
     proc_start_ticks,
     process_group_alive,
     process_identity_matches,
 )
 from hca.result import Artifact
-from hca.routing import planner_slots, reviewer_slots, worker_slots
+from hca.routing import (
+    planner_slots,
+    resolve_role_hint,
+    reviewer_slots,
+    worker_slots,
+)
 from hca.run import RunState, RunStore
 from hca.state import StateDB
 
@@ -65,37 +74,97 @@ _REVIEW_STATUSES = frozenset({"review"})
 def default_planner(
     cfg: FleetConfig, spec, planner: str, worker: str
 ) -> list[TaskNode]:
-    """Minimal bounded decomposition: one work task + a final collection task.
+    """Deterministic bounded fan-out from explicitly independent criteria.
 
-    Deliberately conservative — a one-step goal uses exactly one *execution*
-    worker after planning; the final node is planner-owned collection, not an
-    execution worker. Richer team presets replace this without changing the
-    barrier or the dispatch contract.
+    A one-step goal remains one execution task. Fan-out is created only when the
+    operator supplies at least two acceptance criteria *and* explicitly declares
+    them mutually independent. HCA never infers independence from opaque prose.
+    The resulting DAG is independent of the requested execution concurrency:
+    ``concurrency`` controls only the active dispatch wave, enabling fair c1/cN
+    comparisons over the same tasks. Every slice converges through one
+    integration node before optional review and final collection.
     """
-    acceptance = tuple(spec.acceptance_criteria) or ("goal addressed",)
-    nodes = [
-        TaskNode(
-            id="work",
-            title=f"Implement: {spec.goal[:80]}",
-            role_hint="worker",
-            scope=(
-                f"{spec.goal[:400] or 'the run goal'}\n\n"
-                "Complete the Kanban task only after producing a concrete result "
-                "or attachment that addresses the acceptance criteria."
-            ),
-            acceptance_criteria=acceptance,
-            expected_artifacts=("result summary",),
-            kind="work",
+    requested_acceptance = tuple(spec.acceptance_criteria)
+    acceptance = requested_acceptance or ("goal addressed",)
+    reviewed = review_required(spec)
+    # Parallel graphs reserve one integration, one final, and (when enabled)
+    # one review + one sticky review gate inside the run's task budget.
+    graph_overhead = 2 + (2 if reviewed else 0)
+    max_parallel_work = max(0, int(spec.budgets.max_tasks) - graph_overhead)
+    fanout = min(
+        len(requested_acceptance),
+        max(1, int(spec.budgets.max_workers)),
+        max_parallel_work,
+    )
+    parallel = bool(spec.independent_criteria and fanout >= 2)
+
+    nodes: list[TaskNode] = []
+    if parallel:
+        criterion_groups: list[list[str]] = [[] for _ in range(fanout)]
+        for index, criterion in enumerate(requested_acceptance):
+            criterion_groups[index % fanout].append(criterion)
+        for index, group in enumerate(criterion_groups, 1):
+            nodes.append(
+                TaskNode(
+                    id=f"work-{index}",
+                    title=f"Independent work slice {index}: {spec.goal[:64]}",
+                    role_hint="worker",
+                    scope=(
+                        f"Overall goal: {spec.goal[:400]}\n\n"
+                        "Work only on this independently verifiable slice. Do not assume "
+                        "another worker's mutable checkout. Complete with a concrete result "
+                        "or artifact and include every handoff detail needed by integration."
+                    ),
+                    acceptance_criteria=tuple(group),
+                    expected_artifacts=(f"independent slice {index} result",),
+                    kind="work",
+                )
+            )
+        work_ids = tuple(node.id for node in nodes)
+        nodes.append(
+            TaskNode(
+                id="integration",
+                title="Integrate the independent work slices",
+                role_hint="worker",
+                depends_on=work_ids,
+                scope=(
+                    f"Overall goal: {spec.goal[:400]}\n\n"
+                    "Read every parent result, reconcile conflicts, and produce one coherent "
+                    "integrated result satisfying all acceptance criteria. Preserve source "
+                    "provenance; never claim a parent artifact that was not actually produced."
+                ),
+                acceptance_criteria=acceptance,
+                expected_artifacts=("integrated result with parent provenance",),
+                kind="integration",
+            )
         )
-    ]
-    final_parent = "work"
-    if review_required(spec):
+        implementation_parent = "integration"
+    else:
+        nodes.append(
+            TaskNode(
+                id="work",
+                title=f"Implement: {spec.goal[:80]}",
+                role_hint="worker",
+                scope=(
+                    f"{spec.goal[:400] or 'the run goal'}\n\n"
+                    "Complete the Kanban task only after producing a concrete result "
+                    "or attachment that addresses the acceptance criteria."
+                ),
+                acceptance_criteria=acceptance,
+                expected_artifacts=("result summary",),
+                kind="work",
+            )
+        )
+        implementation_parent = "work"
+
+    final_parent = implementation_parent
+    if reviewed:
         nodes.append(
             TaskNode(
                 id="review-1",
                 title="Independently verify the implementation",
                 role_hint="reviewer",
-                depends_on=("work",),
+                depends_on=(implementation_parent,),
                 scope=(
                     "Review the preceding implementation against the stated goal and "
                     "acceptance criteria. Do not modify the implementation. Start the "
@@ -150,7 +219,7 @@ class KanbanOrchestrator:
         planner_fn: PlannerFn = default_planner,
         max_ticks: int = 120,
         poll_interval: float = 0.1,
-        max_wall_seconds: float = 90.0,
+        max_wall_seconds: Optional[float] = None,
         enforce_sole_dispatcher: bool = True,
     ):
         self.cfg = cfg
@@ -163,7 +232,11 @@ class KanbanOrchestrator:
         # authoritative: a fast poll interval must not silently shorten a run.
         self.max_ticks = max_ticks
         self.poll_interval = max(0.2, float(poll_interval))
-        self.max_wall_seconds = max_wall_seconds
+        self.max_wall_seconds = (
+            None
+            if max_wall_seconds is None
+            else max(0.1, float(max_wall_seconds))
+        )
         self.enforce_sole_dispatcher = enforce_sole_dispatcher
 
     # -- kanban connection -------------------------------------------------
@@ -298,17 +371,50 @@ class KanbanOrchestrator:
             ):
                 raise HermesCompatError(f"could not create sticky review gate {task_id}")
 
-    def _profile_for_hint(self, hint: str, planner: str, worker: str) -> str:
-        hint = (hint or "").lower()
-        if hint in ("planner", "orchestrator", "final"):
+    def _profile_for_hint(
+        self,
+        hint: str,
+        planner: str,
+        worker: str,
+        *,
+        worker_index: int = 0,
+    ) -> str:
+        normalized = (hint or "").lower()
+        if normalized in ("planner", "orchestrator", "final"):
             return planner
-        if hint in ("reviewer", "review", "qa"):
+        if normalized in ("reviewer", "review", "qa"):
             return self._reviewer_profile()
-        return worker
+
+        concrete_role, error = resolve_role_hint(normalized or "worker")
+        if error:
+            raise HermesCompatError(error)
+        pool = worker_slots(self.cfg)
+        if concrete_role:
+            pool = [slot for slot in pool if slot.role == concrete_role]
+        if not pool:
+            if concrete_role:
+                raise HermesCompatError(
+                    f"no concrete worker profile exists for role {concrete_role!r}"
+                )
+            return worker
+        return pool[worker_index % len(pool)].profile
 
     # -- plan --------------------------------------------------------------
 
     def plan(self, spec, store: RunStore) -> RunState:
+        # Ownership is a prerequisite to graph creation, not merely dispatch.
+        # A live embedded gateway enumerates every board in its Hermes home and
+        # could claim newly-ready children between decomposition and HCA's first
+        # dispatch tick. Fail closed before opening/creating the board.
+        if self.enforce_sole_dispatcher:
+            try:
+                assert_sole_dispatcher(self.board)
+            except HermesCompatError as exc:
+                reason = f"dispatcher ownership preflight failed: {exc}"
+                store.append_event(spec.run_id, "run.preflight", reason)
+                store.set_state(spec.run_id, RunState.BLOCKED, reason=reason)
+                return RunState.BLOCKED
+
         planner = self._planner_profile()
         worker = self._worker_profile()
 
@@ -406,8 +512,25 @@ class KanbanOrchestrator:
     ) -> list[dict]:
         index = {n.id: i for i, n in enumerate(nodes)}
         children: list[dict] = []
+        worker_index = 0
         for n in nodes:
             parents = [index[d] for d in n.depends_on if d in index]
+            is_execution = (n.role_hint or "").lower() not in {
+                "planner",
+                "orchestrator",
+                "final",
+                "reviewer",
+                "review",
+                "qa",
+            }
+            assignee = self._profile_for_hint(
+                n.role_hint,
+                planner,
+                worker,
+                worker_index=worker_index,
+            )
+            if is_execution:
+                worker_index += 1
             children.append(
                 {
                     "title": n.title,
@@ -415,13 +538,25 @@ class KanbanOrchestrator:
                         f"{n.scope}\n\nacceptance: "
                         f"{'; '.join(n.acceptance_criteria) or 'n/a'}"
                     ),
-                    "assignee": self._profile_for_hint(n.role_hint, planner, worker),
+                    "assignee": assignee,
                     "parents": parents,
                 }
             )
         return children
 
     # -- execute -----------------------------------------------------------
+
+    def _observation_window_seconds(self, spec) -> float:
+        """Resolve the authoritative run observation budget.
+
+        Production uses the per-run wall budget. Tests/embedders may provide an
+        explicit constructor cap, which can only shorten—not extend—the run's
+        declared budget.
+        """
+        run_budget = max(0.1, float(spec.budgets.wall_seconds))
+        if self.max_wall_seconds is None:
+            return run_budget
+        return min(run_budget, self.max_wall_seconds)
 
     def execute(self, spec, store: RunStore) -> ExecutionEvidence:
         mapping = self._mapping(store, spec.run_id)
@@ -435,10 +570,8 @@ class KanbanOrchestrator:
         node_kinds = mapping.get("node_kinds") or {}
         reviewer_profile = mapping.get("reviewer_profile", "")
 
-        deadline = time.time() + min(
-            float(spec.budgets.wall_seconds or self.max_wall_seconds),
-            self.max_wall_seconds,
-        )
+        observation_window = self._observation_window_seconds(spec)
+        deadline = time.time() + observation_window
         wave = max(1, int(spec.concurrency or 1))
 
         ticks = 0
@@ -450,6 +583,7 @@ class KanbanOrchestrator:
                 mapping = self.advance(spec, store) or mapping
                 child_ids = list(mapping.get("child_task_ids") or [])
                 node_kinds = mapping.get("node_kinds") or {}
+                self._quarantine_worker_graph_expansion(spec, store, mapping)
                 review_block = next(
                     (
                         event
@@ -463,8 +597,23 @@ class KanbanOrchestrator:
                     break
                 before_dispatch = self._statuses(child_ids)
                 statuses = before_dispatch
-                if sum(status == "running" for status in before_dispatch.values()) < wave:
-                    self._dispatch_tick(wave)
+                # Reap terminal-task ownership before deciding whether the
+                # wave has a free slot. A terminal task with a still-running
+                # projection remains active until this exact-identity sweep
+                # proves its worker gone.
+                self._reconcile_leases(child_ids, before_dispatch)
+                if (
+                    before_dispatch
+                    and all(
+                        status in TERMINAL_TASK_STATUSES
+                        for status in before_dispatch.values()
+                    )
+                    and not self._live_owned_worker_tasks(child_ids)
+                ):
+                    terminal = True
+                    break
+                if self._active_wave_count(child_ids, before_dispatch) < wave:
+                    self._dispatch_tick(wave, child_ids)
                     statuses = self._statuses(child_ids)
             except HermesCompatError as exc:
                 return ExecutionEvidence(
@@ -475,8 +624,10 @@ class KanbanOrchestrator:
             # (terminal, or reclaimed after a worker crash) so admission frees
             # its credit exactly once.
             self._reconcile_leases(child_ids, statuses)
-            if statuses and all(
-                s in TERMINAL_TASK_STATUSES for s in statuses.values()
+            if (
+                statuses
+                and all(s in TERMINAL_TASK_STATUSES for s in statuses.values())
+                and not self._live_owned_worker_tasks(child_ids)
             ):
                 terminal = True
                 break
@@ -489,6 +640,12 @@ class KanbanOrchestrator:
                 )
             ]
             if holding and not any(s == "running" for s in statuses.values()):
+                # Upstream block/failure truth can be committed before the
+                # exact Hermes worker exits. Do not project a settled holding
+                # state while HCA still owns that process and lease.
+                if self._live_owned_worker_tasks(child_ids):
+                    time.sleep(self.poll_interval)
+                    continue
                 tid, status = holding[0]
                 paused_reason = f"execution paused: task {tid} is {status}"
                 break
@@ -500,6 +657,11 @@ class KanbanOrchestrator:
         evidence = self._build_evidence(
             spec, root_id, child_ids, node_kinds, reviewer_profile
         )
+        if not evidence.live_worker_task_ids:
+            # A process can reap between the prior sweep and evidence build.
+            # Exact-dead identities cannot become live again; finish releasing
+            # their leases before success is projected.
+            self._reconcile_leases(child_ids, self._statuses(child_ids))
         self._sync_questions_from_evidence(spec, store, evidence)
         if not terminal:
             evidence.reason = paused_reason or (
@@ -518,9 +680,11 @@ class KanbanOrchestrator:
         mapping = self._mapping(store, spec.run_id)
         if not mapping:
             raise RuntimeError("planning produced no Kanban mapping")
-        self.advance(spec, store)
+        mapping = self.advance(spec, store) or mapping
+        self._quarantine_worker_graph_expansion(spec, store, mapping)
         wave = max(1, int(spec.concurrency or 1))
-        result = self._dispatch_tick(wave)
+        child_ids = list(mapping.get("child_task_ids") or [])
+        result = self._dispatch_tick(wave, child_ids)
         store.append_event(
             spec.run_id,
             "run.detached",
@@ -541,6 +705,7 @@ class KanbanOrchestrator:
         mapping = self.advance(spec, store) or self._mapping(store, spec.run_id)
         if not mapping:
             return ExecutionEvidence(reason="no Kanban mapping for controller tick")
+        self._quarantine_worker_graph_expansion(spec, store, mapping)
         child_ids = list(mapping.get("child_task_ids") or [])
         node_kinds = dict(mapping.get("node_kinds") or {})
         statuses = self._statuses(child_ids)
@@ -551,30 +716,17 @@ class KanbanOrchestrator:
             for event in store.list_events(spec.run_id)
         )
         wave = max(1, int(spec.concurrency or 1))
-        live_running = 0
-        for task_id, status in statuses.items():
-            if status != "running":
-                continue
-            rec = self.state.latest_run_for_task(self.board, task_id)
-            if rec is None:
-                # An upstream running claim without an HCA mapping is an
-                # unresolved crash boundary; count it conservatively so HCA
-                # cannot spawn a duplicate beside an unknown worker.
-                live_running += 1
-            elif rec.pid_start_ticks is not None:
-                live_running += int(
-                    process_identity_matches(rec.pid, rec.pid_start_ticks)
-                )
-            elif rec.pid and proc_start_ticks(rec.pid) is not None:
-                # Migrated legacy row: live but unprovable, therefore
-                # quarantined and counted rather than replaced.
-                live_running += 1
+        live_running = self._active_wave_count(child_ids, statuses)
+        declared_terminal = bool(statuses) and all(
+            status in TERMINAL_TASK_STATUSES for status in statuses.values()
+        )
         if (
             dispatch
             and not terminal_review_block
+            and not declared_terminal
             and live_running < wave
         ):
-            self._dispatch_tick(wave)
+            self._dispatch_tick(wave, child_ids)
             statuses = self._statuses(child_ids)
             self._reconcile_leases(child_ids, statuses)
 
@@ -588,8 +740,68 @@ class KanbanOrchestrator:
             node_kinds,
             mapping.get("reviewer_profile", ""),
         )
+        if not evidence.live_worker_task_ids:
+            self._reconcile_leases(child_ids, self._statuses(child_ids))
         self._sync_questions_from_evidence(spec, store, evidence)
         return evidence
+
+    def _quarantine_worker_graph_expansion(self, spec, store: RunStore, mapping: dict) -> list[str]:
+        """Block ready tasks created by this fleet's workers outside HCA's DAG.
+
+        Hermes workers retain upstream Kanban tools for task handoff, but the HCA
+        controller is the sole owner of graph expansion. A model-created task is
+        therefore preserved as audit evidence while being made non-dispatchable;
+        it never receives an HCA reservation, lease, or process.
+        """
+        allowed = set(mapping.get("child_task_ids") or [])
+        root_id = str(mapping.get("root_task_id") or "")
+        if root_id:
+            allowed.add(root_id)
+        owned_profiles = {
+            slot.profile
+            for slot in (
+                planner_slots(self.cfg)
+                + worker_slots(self.cfg)
+                + reviewer_slots(self.cfg)
+            )
+        }
+        if not owned_profiles:
+            return []
+
+        kb = self._kb()
+        conn = self._conn()
+        denied: list[str] = []
+        try:
+            for task in kb.list_tasks(conn, status="ready"):
+                task_id = str(getattr(task, "id", "") or "")
+                if not task_id or task_id in allowed:
+                    continue
+                if str(getattr(task, "created_by", "") or "") not in owned_profiles:
+                    continue
+                if getattr(task, "current_run_id", None) is not None:
+                    continue
+                if kb.block_task(
+                    conn,
+                    task_id,
+                    reason=(
+                        f"HCA_OUT_OF_GRAPH: outside persisted graph for run {spec.run_id}; "
+                        "worker graph expansion denied"
+                    ),
+                    kind="capability",
+                ):
+                    denied.append(task_id)
+            conn.commit()
+        finally:
+            conn.close()
+
+        if denied:
+            store.append_event(
+                spec.run_id,
+                "run.graph_expansion_denied",
+                f"quarantined {len(denied)} worker-created out-of-graph task(s)",
+                {"task_ids": denied, "board": self.board},
+            )
+        return denied
 
     def advance(self, spec, store: RunStore) -> Optional[dict]:
         """Advance review/rework gates without claiming or spawning work.
@@ -847,6 +1059,11 @@ class KanbanOrchestrator:
             if status != "running":
                 rec = self.state.latest_run_for_task(self.board, tid)
                 if rec is not None and rec.status == "running":
+                    if self._run_record_is_live(rec):
+                        # The completion tool commits Kanban truth before the
+                        # Hermes process necessarily exits. Keep exact process
+                        # ownership and its lease until the process is reaped.
+                        continue
                     mapped = "completed" if status in {"done", "archived"} else status
                     self.state.mark_run_status(
                         self.board,
@@ -854,19 +1071,98 @@ class KanbanOrchestrator:
                         mapped,
                         error="" if mapped == "completed" else f"upstream task is {status}",
                     )
+                    self._retire_terminal_slot(rec)
                 release_worker_lease(self.state, board=self.board, task_id=tid)
                 self.state.release_leases_by_owner(tid, kind="subagent")
 
-    def _dispatch_tick(self, wave: int) -> dict:
+    def _retire_terminal_slot(self, rec) -> None:
+        """Remove an exact-dead worker's tmux session for a cold fleet.
+
+        ``run_in_slot`` leaves a dead pane after the worker exits. A fleet with
+        ``warm_slots=false`` promises no retained execution slots, so terminal
+        reconciliation owns deleting that HCA-named session after process
+        identity has already been proven gone.
+        """
+        if self.cfg.warm_slots:
+            return
+        from hca.tmux import TmuxManager
+
+        tmux = self._tmux or TmuxManager(socket=self.cfg.tmux_socket)
+        session = rec.tmux_session or rec.slot
+        try:
+            tmux.kill_session(session)
+        except Exception as exc:
+            self.state.set_activity(
+                kind="slot.cleanup_failed",
+                message=f"could not retire terminal slot {session}: {exc}",
+                board=rec.board,
+                task_id=rec.task_id,
+                run_id=rec.run_id,
+                slot=rec.slot,
+            )
+
+    @staticmethod
+    def _run_record_is_live(rec) -> bool:
+        """Conservatively determine whether an owned worker record is alive."""
+        if not rec or not rec.pid:
+            return False
+        if rec.pid_start_ticks is not None:
+            return process_identity_matches(rec.pid, rec.pid_start_ticks)
+        # Legacy rows have no reusable identity token. If their PID is live,
+        # quarantine rather than claiming cleanup we cannot prove.
+        return proc_start_ticks(rec.pid) is not None
+
+    def _live_owned_worker_tasks(self, child_ids: list[str]) -> list[str]:
+        live: list[str] = []
+        for task_id in child_ids:
+            rec = self.state.latest_run_for_task(self.board, task_id)
+            if rec is not None and rec.status == "running" and self._run_record_is_live(rec):
+                live.append(task_id)
+        return live
+
+    def _active_wave_count(
+        self, child_ids: list[str], statuses: dict[str, str]
+    ) -> int:
+        """Count every upstream or exact-owned worker consuming wave capacity.
+
+        ``kanban_complete`` makes a task terminal before its Hermes process has
+        necessarily exited.  Such a worker must still occupy its c1/cN slot;
+        otherwise a nominal c1 run briefly overlaps successive workers and a cN
+        run can exceed its declared wave. Unknown upstream running claims are
+        counted conservatively as active.
+        """
+        active = set(self._live_owned_worker_tasks(child_ids))
+        for task_id, status in statuses.items():
+            if task_id in active:
+                continue
+            rec = self.state.latest_run_for_task(self.board, task_id)
+            if status != "running":
+                if rec is not None and rec.status == "running":
+                    # Reconciliation—not a second racy liveness read—owns the
+                    # transition from active terminal worker to reaped.
+                    active.add(task_id)
+                continue
+            if rec is None or rec.status != "running":
+                # An upstream claim without matching HCA ownership is unknown,
+                # so it consumes capacity conservatively.
+                active.add(task_id)
+            elif self._run_record_is_live(rec):
+                active.add(task_id)
+            # Exact HCA identity is known dead: dispatch_tick owns crash
+            # reconciliation and may reclaim/replace it on this tick.
+        return len(active)
+
+    def _dispatch_tick(self, wave: int, allowed_task_ids: list[str]) -> dict:
         from hca.kanban import dispatch_tick
         from hca.tmux import TmuxManager
 
-        tmux = self._tmux or TmuxManager(socket=f"hca-{self.cfg.name}")
+        tmux = self._tmux or TmuxManager(socket=self.cfg.tmux_socket)
         return dispatch_tick(
             self.cfg,
             self.state,
             tmux,
             max_spawn=wave,
+            allowed_task_ids=set(allowed_task_ids),
             max_in_progress_per_profile=1,
             skip_sole_dispatcher_check=not self.enforce_sole_dispatcher,
         )
@@ -951,7 +1247,7 @@ class KanbanOrchestrator:
                 status = getattr(t, "status", "") or ""
                 kind = node_kinds.get(tid, "")
                 is_review = kind in ("review", "verification") or status in _REVIEW_STATUSES
-                result = getattr(t, "result", "") or ""
+                task_result = getattr(t, "result", "") or ""
                 latest_upstream_run = None
                 latest_run_fn = getattr(kb, "latest_run", None)
                 if callable(latest_run_fn):
@@ -959,6 +1255,25 @@ class KanbanOrchestrator:
                         latest_upstream_run = latest_run_fn(conn, tid)
                     except Exception:
                         latest_upstream_run = None
+                run_summary = (
+                    getattr(latest_upstream_run, "summary", "") or ""
+                    if latest_upstream_run is not None
+                    else ""
+                )
+                run_outcome = (
+                    getattr(latest_upstream_run, "outcome", "") or ""
+                    if latest_upstream_run is not None
+                    else ""
+                )
+                # Upstream Hermes documents task_runs.summary as the structured
+                # handoff consumed by downstream workers. A successful summary
+                # is durable result evidence when the optional task.result field
+                # is empty; failed/blocked attempt summaries never qualify.
+                result = task_result or (
+                    run_summary
+                    if status == "done" and run_outcome == "completed"
+                    else ""
+                )
                 tasks.append(
                     TaskEvidence(
                         task_id=tid,
@@ -972,11 +1287,7 @@ class KanbanOrchestrator:
                         reviewed_by=(getattr(t, "assignee", "") or "") if is_review else "",
                         review_verdict=self._review_verdict(result) if is_review else "",
                         block_kind=getattr(t, "block_kind", "") or "",
-                        block_reason=(
-                            getattr(latest_upstream_run, "summary", "") or ""
-                            if latest_upstream_run is not None
-                            else ""
-                        ),
+                        block_reason=run_summary if status == "blocked" else "",
                         kind=kind,
                         is_root=(kind == "final"),
                     )
@@ -1002,7 +1313,11 @@ class KanbanOrchestrator:
                 if task.kind == "gate" and task.terminal_status == "blocked":
                     task.block_kind = "hca_review_gate"
                     task.block_reason = "awaiting an accepted independent review"
-        return ExecutionEvidence(root_task_id=root_id, tasks=tasks)
+        return ExecutionEvidence(
+            root_task_id=root_id,
+            tasks=tasks,
+            live_worker_task_ids=self._live_owned_worker_tasks(child_ids),
+        )
 
     @staticmethod
     def _review_verdict(result: str) -> str:
@@ -1258,7 +1573,7 @@ class KanbanOrchestrator:
             # also pick it up; this immediate tick makes `respond` useful when
             # no daemon was already running. Dispatch remains reservation-first.
             try:
-                self._dispatch_tick(1)
+                self._dispatch_tick(1, [task_id])
             except Exception:
                 # The answer and unblock are durable. Admission/supervisor
                 # reconciliation will retry without duplicating the question.

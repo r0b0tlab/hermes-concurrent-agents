@@ -45,7 +45,8 @@ def test_runspec_roundtrip():
         run_id=new_run_id(),
         goal="build a thing",
         constraints=("no network",),
-        acceptance_criteria=("tests pass",),
+        acceptance_criteria=("tests pass", "docs complete"),
+        independent_criteria=True,
         budgets=RunBudgets(max_workers=2),
         idempotency_key="k1",
     )
@@ -53,6 +54,15 @@ def test_runspec_roundtrip():
     back = RunSpec.from_dict(d)
     assert back == spec
     assert back.budgets.max_workers == 2
+    assert back.independent_criteria is True
+
+
+def test_runspec_v1_defaults_to_no_inferred_independence():
+    legacy = RunSpec.from_dict(
+        {"run_id": "legacy", "goal": "g", "schema_version": 1}
+    )
+    assert legacy.independent_criteria is False
+    assert legacy.schema_version == 1
 
 
 def test_store_create_and_transition(tmp_path):

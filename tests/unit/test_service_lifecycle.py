@@ -151,6 +151,17 @@ def test_empty_goal_is_invalid(tmp_path):
     assert not res.ok
 
 
+def test_independence_declaration_requires_multiple_criteria(tmp_path):
+    svc = FleetService(_cfg(tmp_path), orchestrator=PreflightOrchestrator())
+    res = svc.run(
+        "build x",
+        acceptance_criteria=["only one"],
+        independent_criteria=True,
+    )
+    assert res.code == EXIT_INVALID
+    assert "at least two" in res.message
+
+
 def test_unknown_budget_and_overlarge_concurrency_are_rejected(tmp_path):
     svc = FleetService(_cfg(tmp_path), orchestrator=PreflightOrchestrator())
     unknown = svc.run("build x", budgets={"mystery": 3})
@@ -196,8 +207,12 @@ def test_stop_never_becomes_completion(tmp_path):
     res = svc.run("goal")
     stopped = svc.stop(res.run_id)
     assert stopped.state == "cancelled"
+    assert stopped.ok and stopped.code == EXIT_OK
+    status = svc.status(res.run_id)
+    assert not status.ok and status.code == EXIT_BLOCKED
     col = svc.collect(res.run_id)
     assert col.data["result"]["outcome"] == "cancelled"
+    assert not col.ok and col.code == EXIT_BLOCKED
 
 
 def test_stop_persists_stopping_before_signalling_detached_controller(

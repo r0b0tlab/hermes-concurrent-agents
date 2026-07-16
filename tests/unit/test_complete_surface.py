@@ -4,7 +4,7 @@ from pathlib import Path
 import time
 
 from hca.bench import detect_knee, run_bench, LevelResult
-from hca.logs import append_log, read_log
+from hca.logs import append_log, read_log, worker_log_id
 from hca.state import StateDB, RunRecord
 from hca.transcript import fetch_transcript
 from hca.workspaces import mode_for_role
@@ -22,6 +22,14 @@ def test_logs_roundtrip(tmp_path: Path):
     append_log(str(tmp_path), "r1", "world")
     text = read_log(str(tmp_path), "r1", tail=10)
     assert "hello" in text and "world" in text
+
+
+def test_worker_log_identity_namespaces_board_local_run_ids():
+    first = worker_log_id("board-a", "t-one", 2)
+    second = worker_log_id("board-b", "t-one", 2)
+    assert first != second
+    assert "/" not in first and ".." not in first
+    assert worker_log_id("../unsafe", "t/one", 2) != "../unsafe--t/one--2"
 
 
 def test_transcript_activity_fallback(tmp_path: Path):

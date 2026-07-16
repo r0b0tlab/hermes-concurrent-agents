@@ -92,12 +92,23 @@ def probe_chat(endpoint: str, model: str, timeout: float = 30.0) -> ProbeResult:
         data = _http_json(url, method="POST", body=body, timeout=timeout)
         if "error" in data:
             return ProbeResult(False, f"chat error: {data['error']}", data)
-        content = (
-            data.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-        )
-        return ProbeResult(True, f"chat ok: {content[:80]!r}", data)
+        choices = data.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            return ProbeResult(False, "chat response has no choices", data)
+        message = choices[0].get("message") or {}
+        if not isinstance(message, dict):
+            return ProbeResult(False, "chat response has no message object", data)
+        text_field = ""
+        content = ""
+        for candidate in ("content", "reasoning", "reasoning_content"):
+            value = message.get(candidate)
+            if isinstance(value, str) and value.strip():
+                text_field = candidate
+                content = value
+                break
+        if not content:
+            return ProbeResult(False, "chat response has no text or reasoning content", data)
+        return ProbeResult(True, f"chat ok ({text_field}): {content[:80]!r}", data)
     except Exception as exc:
         return ProbeResult(False, f"chat probe failed: {exc}")
 

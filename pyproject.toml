@@ -30,7 +30,7 @@ dev = ["pytest>=7.0", "ruff>=0.4", "pyyaml>=6.0"]
 hca = "hca.cli:main"
 
 [project.entry-points."hermes_agent.plugins"]
-hca = "hca.plugin:register"
+hca = "hca.plugin"
 
 [project.urls]
 Homepage = "https://github.com/r0b0tlab/hermes-concurrent-agents"

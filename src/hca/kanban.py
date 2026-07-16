@@ -24,7 +24,7 @@ from hca.hermes_compat import (
     import_kanban_db,
 )
 from hca.leases import acquire_worker_lease, release_worker_lease
-from hca.logs import log_path
+from hca.logs import log_path, worker_log_id
 from hca.observe import slot_name
 from hca.process_identity import proc_start_ticks
 from hca.resources import admit
@@ -78,7 +78,7 @@ def _role_from_profile(profile: str) -> str:
     are rejected by hca.routing, not silently mapped to coder.
     """
     a = (profile or "").lower()
-    for key in ("orchestrator", "coder", "research", "qa", "creative"):
+    for key in ("orchestrator", "general", "coder", "research", "qa", "creative"):
         if f"-{key}-" in a or a.endswith(f"-{key}"):
             return key
     # For a concrete slot we could not classify, default the *slot count*
@@ -93,6 +93,7 @@ def pre_reserve_ready(
     reservations: Reservations,
     *,
     limit: int,
+    allowed_task_ids: Optional[set[str]] = None,
 ) -> list[str]:
     """Reserve concrete slots for ready, concretely-assigned free tasks.
 
@@ -118,6 +119,9 @@ def pre_reserve_ready(
     for row in rows:
         if len(reserved) >= limit:
             break
+        task_id = str(row["id"])
+        if allowed_task_ids is not None and task_id not in allowed_task_ids:
+            continue
         assignee = (row["assignee"] or "") if isinstance(row, sqlite3.Row) else ""
         if assignee not in concrete:
             continue
@@ -227,6 +231,8 @@ def make_tmux_spawn_fn(
     state: StateDB,
     tmux: TmuxManager,
     reservations: Reservations,
+    *,
+    allowed_task_ids: Optional[set[str]] = None,
 ):
     """Return spawn_fn(task, workspace, board=None) -> int (never None).
 
@@ -242,6 +248,11 @@ def make_tmux_spawn_fn(
         assignee = getattr(task, "assignee", None) or ""
         task_id = getattr(task, "id", "") or ""
 
+        if allowed_task_ids is not None and task_id not in allowed_task_ids:
+            raise WorkerLaunchError(
+                f"task {task_id} is outside the persisted HCA graph — refusing "
+                "to claim or spawn it"
+            )
         if not assignee:
             raise WorkerLaunchError(f"task {task_id} has no concrete assignee")
         if assignee not in reservations.reserved:
@@ -281,7 +292,12 @@ def make_tmux_spawn_fn(
             env=spec.env(),
             unset_env=["HERMES_TUI"],
             workdir=str(workspace) if workspace else None,
-            log_path=str(log_path(cfg.state_dir, str(run_id))),
+            log_path=str(
+                log_path(
+                    cfg.state_dir,
+                    worker_log_id(str(board), str(task_id), run_id),
+                )
+            ),
         )
         if not pid:
             raise WorkerLaunchError(
@@ -390,6 +406,12 @@ def dispatch_tick(
     conn = _open_kanban_conn(cfg.board)
     try:
         wave = int(kwargs.get("max_spawn", cfg.capacity.max_wave_size))
+        raw_allowed = kwargs.get("allowed_task_ids")
+        allowed_task_ids = (
+            {str(task_id) for task_id in raw_allowed}
+            if raw_allowed is not None
+            else None
+        )
         pre_crashed = _reconcile_owned_worker_identities(kb, conn, cfg, state)
         reservations = Reservations()
         # dispatch_once promotes todo/blocked → ready *internally*; run the
@@ -401,8 +423,21 @@ def dispatch_tick(
                 recompute(conn)
             except Exception:
                 pass
-        pre_reserve_ready(cfg, state, conn, reservations, limit=wave)
-        spawn_fn = make_tmux_spawn_fn(cfg, state, tmux, reservations)
+        pre_reserve_ready(
+            cfg,
+            state,
+            conn,
+            reservations,
+            limit=wave,
+            allowed_task_ids=allowed_task_ids,
+        )
+        spawn_fn = make_tmux_spawn_fn(
+            cfg,
+            state,
+            tmux,
+            reservations,
+            allowed_task_ids=allowed_task_ids,
+        )
         configured_cap = int(
             kwargs.get("max_in_progress", cfg.capacity.max_top_level_runs)
         )
@@ -417,7 +452,7 @@ def dispatch_tick(
             conn,
             spawn_fn=spawn_fn,
             board=cfg.board,
-            max_spawn=wave,
+            max_spawn=len(reservations.reserved),
             max_in_progress=admitted_cap,
             max_in_progress_per_profile=kwargs.get("max_in_progress_per_profile", 1),
             dry_run=kwargs.get("dry_run", False),

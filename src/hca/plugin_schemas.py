@@ -62,6 +62,14 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 },
                 "constraints": {"type": "array", "items": {"type": "string"}},
                 "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+                "independent_criteria": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "explicitly declare acceptance criteria mutually independent "
+                        "and authorize bounded fan-out/fan-in"
+                    ),
+                },
                 "source_profiles": {"type": "array", "items": {"type": "string"}},
                 "budgets": {
                     "type": "object",

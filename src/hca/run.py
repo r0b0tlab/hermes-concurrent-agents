@@ -21,7 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
-RUN_SCHEMA_VERSION = 1
+RUN_SCHEMA_VERSION = 2
 
 
 class RunState(str, Enum):
@@ -104,6 +104,7 @@ class RunSpec:
     project_ref: str = ""
     constraints: tuple[str, ...] = ()
     acceptance_criteria: tuple[str, ...] = ()
+    independent_criteria: bool = False
     source_profiles: tuple[str, ...] = ()
     team: str = "default"
     concurrency: int = 1
@@ -131,6 +132,7 @@ class RunSpec:
             project_ref=d.get("project_ref", ""),
             constraints=tuple(d.get("constraints") or ()),
             acceptance_criteria=tuple(d.get("acceptance_criteria") or ()),
+            independent_criteria=bool(d.get("independent_criteria", False)),
             source_profiles=tuple(d.get("source_profiles") or ()),
             team=d.get("team", "default"),
             concurrency=int(d.get("concurrency", 1)),

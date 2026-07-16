@@ -50,6 +50,34 @@ def test_full_evidence_completes():
     assert state == RunState.COMPLETED
 
 
+def test_done_task_with_live_owned_worker_stays_running():
+    ev = ExecutionEvidence(
+        root_task_id="t1",
+        tasks=[_done_task()],
+        live_worker_task_ids=["t1"],
+    )
+    state, reason = derive_final_state(_spec(), ev)
+    assert state == RunState.RUNNING
+    assert "exact process cleanup" in reason
+
+
+def test_needs_input_with_live_owned_worker_stays_running_until_reaped():
+    ev = ExecutionEvidence(
+        root_task_id="t1",
+        tasks=[
+            _done_task(
+                terminal_status="blocked",
+                block_kind="needs_input",
+                block_reason="which target?",
+            )
+        ],
+        live_worker_task_ids=["t1"],
+    )
+    state, reason = derive_final_state(_spec(), ev)
+    assert state == RunState.RUNNING
+    assert "exact process cleanup" in reason
+
+
 def test_done_without_run_id_is_not_completion():
     ev = ExecutionEvidence(root_task_id="t1", tasks=[_done_task(run_id=None)])
     state, reason = derive_final_state(_spec(), ev)
@@ -86,6 +114,7 @@ def test_exhausted_execution_window_holds_blocked():
     ev = ExecutionEvidence(
         root_task_id="t1",
         tasks=[_done_task(terminal_status="running")],
+        live_worker_task_ids=["t1"],
         reason="execution observation window exhausted",
     )
     state, reason = derive_final_state(_spec(), ev)

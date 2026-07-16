@@ -39,6 +39,9 @@ def test_run_parser_exposes_shared_goal_contract():
             "offline",
             "--acceptance",
             "tests pass",
+            "--acceptance",
+            "docs complete",
+            "--independent-criteria",
             "--source-profile",
             "default",
             "--budget",
@@ -54,7 +57,8 @@ def test_run_parser_exposes_shared_goal_contract():
     )
     assert args.goal == "ship it"
     assert args.constraint == ["offline"]
-    assert args.acceptance == ["tests pass"]
+    assert args.acceptance == ["tests pass", "docs complete"]
+    assert args.independent_criteria is True
     assert args.source_profiles == ["default"]
     assert args.budget == ["wall_seconds=60"]
     assert args.detach is True

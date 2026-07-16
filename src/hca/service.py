@@ -154,6 +154,7 @@ class FleetService:
         project_root: str = "",
         constraints: Optional[list[str]] = None,
         acceptance_criteria: Optional[list[str]] = None,
+        independent_criteria: bool = False,
         team: str = "default",
         concurrency: int = 1,
         review_policy: str = "auto",
@@ -179,6 +180,17 @@ class FleetService:
                 False, EXIT_INVALID, "run", "", "invalid",
                 "goal must be a non-empty string",
                 "provide a goal: hca run \"<what to build/research/ship>\"",
+            )
+
+        if independent_criteria and len(acceptance_criteria or ()) < 2:
+            return ServiceResult(
+                False,
+                EXIT_INVALID,
+                "run",
+                "",
+                "invalid",
+                "independent_criteria requires at least two acceptance criteria",
+                "provide two or more --acceptance values, or omit --independent-criteria",
             )
 
         # Idempotency: a caller-supplied key deduplicates; goal text never does.
@@ -253,6 +265,7 @@ class FleetService:
             project_root=project_root,
             constraints=tuple(constraints or ()),
             acceptance_criteria=tuple(acceptance_criteria or ()),
+            independent_criteria=bool(independent_criteria),
             source_profiles=tuple(source_profiles or ()),
             team=team,
             concurrency=int(concurrency),
@@ -279,10 +292,12 @@ class FleetService:
                 )
             elif planned == RunState.BLOCKED:
                 proj_now = self.store.get_run(spec.run_id)
-                self.store.set_state(
-                    spec.run_id, RunState.BLOCKED,
-                    reason=proj_now.reason or "planner produced no dispatchable graph",
-                )
+                if proj_now is not None and proj_now.state != RunState.BLOCKED:
+                    self.store.set_state(
+                        spec.run_id,
+                        RunState.BLOCKED,
+                        reason=proj_now.reason or "planner produced no dispatchable graph",
+                    )
             else:
                 if detach:
                     start = getattr(self.orchestrator, "start", None)
@@ -647,12 +662,12 @@ class FleetService:
                 f"unknown run {run_id}",
             )
         code = EXIT_OK
-        if result.outcome in ("blocked",):
+        if result.outcome in ("blocked", "cancelled"):
             code = EXIT_BLOCKED
         elif result.outcome == "failed":
             code = EXIT_RUNTIME
         return ServiceResult(
-            result.outcome in ("success", "partial", "cancelled"),
+            result.outcome in ("success", "partial"),
             code, "collect", run_id, result.state, result.summary,
             data={"result": result.to_dict()},
         )
@@ -750,7 +765,11 @@ class FleetService:
             ok = False
             remediation = proj.reason or "run failed — see events"
         elif state == RunState.CANCELLED:
-            ok = True
+            # Stopping a run successfully is a successful *stop operation*.
+            # Observing that same cancellation through run/status must not emit
+            # exit 0, which automation would mistake for a completed run.
+            ok = action == "stop"
+            code = EXIT_OK if ok else EXIT_BLOCKED
             remediation = "cancelled; collect partial work with `hca collect`"
         msg = message or f"run {proj.run_id} is {state.value}"
         return ServiceResult(

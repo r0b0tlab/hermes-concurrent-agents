@@ -16,7 +16,7 @@ from hca.bench import run_bench
 from hca.config import config_shape, list_presets, load_fleet_config
 from hca.doctor import run_doctor
 from hca.hermes_compat import HermesCompatError, hermes_version, run_hermes
-from hca.logs import follow_log, read_log
+from hca.logs import follow_log, read_log, worker_log_id
 from hca.observe import format_status_table, peek_slot, status_rows
 from hca.profiles import init_profiles
 from hca.resources import fetch_capacity
@@ -148,6 +148,7 @@ def cmd_run(args) -> int:
         project_root=getattr(args, "project", "") or "",
         constraints=list(getattr(args, "constraint", []) or []),
         acceptance_criteria=list(getattr(args, "acceptance", []) or []),
+        independent_criteria=bool(getattr(args, "independent_criteria", False)),
         source_profiles=list(getattr(args, "source_profiles", []) or []),
         team=getattr(args, "team", "default") or "default",
         concurrency=int(getattr(args, "concurrency", 1) or 1),
@@ -393,7 +394,11 @@ def cmd_logs(args) -> int:
     cfg = _cfg_from_args(args)
     state = _state(cfg)
     rec = resolve_run(state, args.target)
-    run_id = rec["run_id"] if rec else args.target
+    run_id = (
+        worker_log_id(rec["board"], rec["task_id"], rec["run_id"])
+        if rec
+        else args.target
+    )
     if args.follow:
         try:
             for line in follow_log(cfg.state_dir, run_id):
@@ -402,6 +407,9 @@ def cmd_logs(args) -> int:
             return 0
         return 0
     text = read_log(cfg.state_dir, run_id, tail=args.tail)
+    if not text and rec:
+        # Backward compatibility with logs written before board/task namespacing.
+        text = read_log(cfg.state_dir, rec["run_id"], tail=args.tail)
     if not text and rec:
         # fallback to peek
         tmux = TmuxManager(cfg.tmux_socket)
@@ -848,6 +856,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--constraint", action="append", default=[], help="repeatable run constraint")
     p_run.add_argument(
         "--acceptance", action="append", default=[], help="repeatable acceptance criterion"
+    )
+    p_run.add_argument(
+        "--independent-criteria",
+        action="store_true",
+        help=(
+            "declare acceptance criteria mutually independent and authorize a "
+            "bounded fan-out/fan-in graph; concurrency controls its active wave"
+        ),
     )
     p_run.add_argument(
         "--source-profile", dest="source_profiles", action="append", default=[],

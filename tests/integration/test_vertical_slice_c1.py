@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 
 from hca.config import load_fleet_config
+from hca.hermes_compat import HermesCompatError
 from hca.kanban_orchestrator import KanbanOrchestrator
 from hca.routing import concrete_slots
 from hca.run import RunStore
@@ -51,6 +52,69 @@ conn = kb.connect(board=os.environ.get("HERMES_KANBAN_BOARD") or None)
 try:
     kb.complete_task(conn, tid, result="done by fake worker " + tid,
                      summary="fake worker complete", expected_run_id=rid)
+    conn.commit()
+finally:
+    conn.close()
+"""
+
+# Real upstream completion may carry the durable text handoff in the run's
+# structured ``summary`` while leaving the task's optional ``result`` column
+# empty. Hermes downstream context treats that summary as the worker result;
+# HCA must project the same contract rather than report empty success.
+_SUMMARY_ONLY_WORKER_SRC = r"""
+import os, sys, time
+sys.path.insert(0, os.environ["HCA_WORKER_HERMES_SRC"])
+from hermes_cli import kanban_db as kb
+kb._fire_kanban_lifecycle_hook = lambda *args, **kwargs: None
+tid = os.environ["HERMES_KANBAN_TASK"]
+rid = int(os.environ["HERMES_KANBAN_RUN_ID"])
+time.sleep(0.15)
+conn = kb.connect(board=os.environ.get("HERMES_KANBAN_BOARD") or None)
+try:
+    if not kb.complete_task(
+        conn,
+        tid,
+        summary="durable summary-only result for " + tid,
+        expected_run_id=rid,
+    ):
+        raise RuntimeError("summary-only completion CAS failed")
+    conn.commit()
+finally:
+    conn.close()
+"""
+
+# A worker may create a ready task using its broad upstream Kanban toolset.
+# HCA owns only the persisted graph it planned; the extra task must never gain
+# a process, run record, or lease merely because it shares the board.
+_OUT_OF_GRAPH_WORKER_SRC = r"""
+import os, sys, time
+sys.path.insert(0, os.environ["HCA_WORKER_HERMES_SRC"])
+from hermes_cli import kanban_db as kb
+kb._fire_kanban_lifecycle_hook = lambda *args, **kwargs: None
+tid = os.environ["HERMES_KANBAN_TASK"]
+rid = int(os.environ["HERMES_KANBAN_RUN_ID"])
+profile = os.environ["HERMES_PROFILE"]
+time.sleep(0.15)
+conn = kb.connect(board=os.environ.get("HERMES_KANBAN_BOARD") or None)
+try:
+    task = kb.get_task(conn, tid)
+    if task and task.title.startswith("Implement:"):
+        kb.create_task(
+            conn,
+            title="worker-created out-of-graph task",
+            body="must remain outside HCA ownership",
+            assignee=profile,
+            created_by=profile,
+            board=os.environ.get("HERMES_KANBAN_BOARD") or None,
+        )
+    if not kb.complete_task(
+        conn,
+        tid,
+        result="completed declared graph task " + tid,
+        summary="declared task complete",
+        expected_run_id=rid,
+    ):
+        raise RuntimeError("declared completion CAS failed")
     conn.commit()
 finally:
     conn.close()
@@ -144,6 +208,63 @@ finally:
 """
 
 
+_PARALLEL_WORKER_SRC = r"""
+import fcntl, json, os, sys, time
+sys.path.insert(0, os.environ["HCA_WORKER_HERMES_SRC"])
+from hermes_cli import kanban_db as kb
+kb._fire_kanban_lifecycle_hook = lambda *args, **kwargs: None
+tid = os.environ["HERMES_KANBAN_TASK"]
+rid = int(os.environ["HERMES_KANBAN_RUN_ID"])
+log_path = os.environ["HCA_PARALLEL_INTERVAL_LOG"]
+time.sleep(0.15)
+conn = kb.connect(board=os.environ.get("HERMES_KANBAN_BOARD") or None)
+try:
+    task = kb.get_task(conn, tid)
+    title = task.title if task else ""
+    parents = kb.parent_results(conn, tid)
+finally:
+    conn.close()
+
+def emit(phase):
+    row = {
+        "task_id": tid,
+        "title": title,
+        "phase": phase,
+        "time": time.monotonic(),
+        "pid": os.getpid(),
+        "cwd": os.getcwd(),
+    }
+    with open(log_path, "a", encoding="utf-8") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        stream.write(json.dumps(row, sort_keys=True) + "\n")
+        stream.flush()
+        fcntl.flock(stream, fcntl.LOCK_UN)
+
+emit("start")
+if title.startswith("Independent work slice"):
+    time.sleep(0.6)
+else:
+    time.sleep(0.05)
+if title.startswith("Integrate"):
+    if len(parents) != 2 or not all(result for _, result in parents):
+        raise RuntimeError("integration did not receive both parent results")
+emit("end")
+conn = kb.connect(board=os.environ.get("HERMES_KANBAN_BOARD") or None)
+try:
+    if not kb.complete_task(
+        conn,
+        tid,
+        result=f"completed {title}; parent_results={len(parents)}",
+        summary="deterministic parallel acceptance worker",
+        expected_run_id=rid,
+    ):
+        raise RuntimeError(f"completion CAS failed for {tid}")
+    conn.commit()
+finally:
+    conn.close()
+"""
+
+
 class FakeTmux:
     """Stand-in for TmuxManager: launches a real subprocess worker per slot."""
 
@@ -157,6 +278,7 @@ class FakeTmux:
         self.worker_src = worker_src
         self.extra_env = dict(extra_env or {})
         self.procs: list[subprocess.Popen] = []
+        self.calls: list[dict] = []
 
     def run_in_slot(self, name, command, *, env=None, unset_env=None,
                     workdir=None, log_path=None) -> int:
@@ -168,9 +290,19 @@ class FakeTmux:
         # start_new_session=True gives the worker its own process group (as a
         # tmux pane would), so cancellation can killpg it without touching the
         # test runner.
+        self.calls.append(
+            {
+                "name": name,
+                "command": command,
+                "env": dict(env or {}),
+                "workdir": workdir,
+                "log_path": log_path,
+            }
+        )
         proc = subprocess.Popen(
             [sys.executable, "-c", self.worker_src],
             env=worker_env,
+            cwd=workdir,
             start_new_session=True,
         )
         self.procs.append(proc)
@@ -260,6 +392,36 @@ def _evidence_event(store, run_id):
     return ev
 
 
+def test_dispatcher_conflict_blocks_before_creating_any_kanban_task(
+    monkeypatch, tmp_path, hermes_runtime
+):
+    cfg, state_dir = _make_env(monkeypatch, tmp_path, hermes_runtime.src_path)
+    board_path = Path(hermes_runtime.kb.kanban_db_path(board=cfg.board))
+
+    def conflict(_board):
+        raise HermesCompatError("live gateway owns this Hermes home")
+
+    monkeypatch.setattr("hca.kanban_orchestrator.assert_sole_dispatcher", conflict)
+    state = StateDB(state_dir / "hca.sqlite")
+    orch = KanbanOrchestrator(
+        cfg,
+        state=state,
+        tmux=FakeTmux(hermes_runtime.src_path),
+        board=cfg.board,
+        enforce_sole_dispatcher=True,
+    )
+    svc = FleetService(cfg, orchestrator=orch, store=RunStore(state_dir / "runs.sqlite"))
+    result = svc.run("must not create an upstream task", review_policy="never")
+
+    assert result.state == "blocked"
+    assert "dispatcher ownership preflight failed" in result.remediation
+    assert not board_path.exists()
+    assert not any(
+        event["kind"] == "run.kanban_root"
+        for event in svc.store.list_events(result.run_id)
+    )
+
+
 def test_c1_vertical_slice_completes_with_real_evidence(
     monkeypatch, tmp_path, hermes_runtime
 ):
@@ -314,6 +476,200 @@ def test_c1_vertical_slice_completes_with_real_evidence(
     assert len(manifest["manifest_sha256"]) == 64
 
     # every durable worker lease was released on terminal completion
+    assert state.active_lease_credits() == 0.0
+
+
+def test_summary_only_upstream_handoff_is_result_evidence(
+    monkeypatch, tmp_path, hermes_runtime
+):
+    svc, res, _cfg, state = _run_slice(
+        monkeypatch, tmp_path, hermes_runtime, _SUMMARY_ONLY_WORKER_SRC
+    )
+
+    assert res.state == "completed", res.to_dict()
+    evidence = _evidence_event(svc.store, res.run_id)
+    done = [task for task in evidence["tasks"] if task["terminal_status"] == "done"]
+    assert done
+    assert all(task["result"].startswith("durable summary-only result") for task in done)
+    assert all(not task["block_reason"] for task in done)
+    assert state.active_lease_credits() == 0.0
+
+
+def test_worker_created_task_never_leaves_the_persisted_graph(
+    monkeypatch, tmp_path, hermes_runtime
+):
+    svc, res, cfg, state = _run_slice(
+        monkeypatch, tmp_path, hermes_runtime, _OUT_OF_GRAPH_WORKER_SRC
+    )
+
+    assert res.state == "completed", res.to_dict()
+    mapping = next(
+        event["data"]
+        for event in svc.store.list_events(res.run_id)
+        if event["kind"] == "run.kanban_root"
+    )
+    conn = hermes_runtime.kb.connect(board=cfg.board)
+    try:
+        extra = conn.execute(
+            "SELECT id, status, block_kind FROM tasks WHERE title = ?",
+            ("worker-created out-of-graph task",),
+        ).fetchone()
+        assert extra is not None
+        block = conn.execute(
+            "SELECT outcome, summary FROM task_runs "
+            "WHERE task_id=? ORDER BY id DESC LIMIT 1",
+            (extra["id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert extra["id"] not in mapping["child_task_ids"]
+    assert extra["status"] == "blocked"
+    assert extra["block_kind"] == "capability"
+    assert block is not None
+    assert block["outcome"] == "blocked"
+    assert "HCA_OUT_OF_GRAPH" in block["summary"]
+    assert "worker graph expansion denied" in block["summary"]
+    assert state.latest_run_for_task(cfg.board, extra["id"]) is None
+    denied = [
+        event
+        for event in svc.store.list_events(res.run_id)
+        if event["kind"] == "run.graph_expansion_denied"
+    ]
+    assert denied and denied[-1]["data"]["task_ids"] == [extra["id"]]
+    assert state.active_lease_credits() == 0.0
+
+
+def test_parallel_acceptance_uses_distinct_workers_worktrees_and_real_overlap(
+    monkeypatch, tmp_path, hermes_runtime
+):
+    repo = tmp_path / "project"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "HCA Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "hca@example.invalid"],
+        check=True,
+    )
+    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "seed.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "seed"], check=True)
+
+    cfg, state_dir = _make_env(monkeypatch, tmp_path, hermes_runtime.src_path)
+    cfg.name = "parallel"
+    cfg.profile_slots = {"orchestrator": 1, "coder": 2, "qa": 1}
+    home = Path(os.environ["HERMES_HOME"])
+    for slot in concrete_slots(cfg):
+        (home / "profiles" / slot.profile).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        hermes_runtime.kb, "_fire_kanban_lifecycle_hook", lambda *args, **kwargs: None
+    )
+    interval_log = tmp_path / "parallel-intervals.jsonl"
+    state = StateDB(state_dir / "hca.sqlite")
+    tmux = FakeTmux(
+        hermes_runtime.src_path,
+        worker_src=_PARALLEL_WORKER_SRC,
+        extra_env={"HCA_PARALLEL_INTERVAL_LOG": str(interval_log)},
+    )
+    orch = KanbanOrchestrator(
+        cfg,
+        state=state,
+        tmux=tmux,
+        board=cfg.board,
+        enforce_sole_dispatcher=False,
+        max_wall_seconds=20,
+        poll_interval=0.2,
+    )
+    svc = FleetService(cfg, orchestrator=orch, store=RunStore(state_dir / "runs.sqlite"))
+    try:
+        result = svc.run(
+            "Produce two independent results and combine them",
+            project_root=str(repo),
+            acceptance_criteria=["produce alpha result", "produce beta result"],
+            independent_criteria=True,
+            concurrency=2,
+            review_policy="never",
+            budgets={"wall_seconds": 20, "max_tasks": 8},
+        )
+    finally:
+        tmux.cleanup()
+
+    assert result.state == "completed", result.to_dict()
+    mapping = orch._mapping(svc.store, result.run_id)
+    assert mapping is not None
+    work_ids = [
+        task_id
+        for task_id, kind in mapping["node_kinds"].items()
+        if kind == "work"
+    ]
+    assert len(work_ids) == 2
+    assert list(mapping["node_kinds"].values()).count("integration") == 1
+
+    conn = hermes_runtime.kb.connect(board=cfg.board)
+    try:
+        work_tasks = [hermes_runtime.kb.get_task(conn, task_id) for task_id in work_ids]
+    finally:
+        conn.close()
+    assert len({task.assignee for task in work_tasks}) == 2
+    assert all(task.workspace_kind == "worktree" for task in work_tasks)
+
+    work_calls = [
+        call
+        for call in tmux.calls
+        if call["env"].get("HERMES_KANBAN_TASK") in set(work_ids)
+    ]
+    assert len(work_calls) == 2
+    workdirs = {str(call["workdir"]) for call in work_calls}
+    assert len(workdirs) == 2
+    assert all("/.worktrees/" in workdir for workdir in workdirs)
+    assert all(Path(workdir).is_dir() for workdir in workdirs)
+
+    rows = [json.loads(line) for line in interval_log.read_text().splitlines()]
+    intervals = {}
+    for row in rows:
+        intervals.setdefault(row["task_id"], {})[row["phase"]] = row
+    work_intervals = [intervals[task_id] for task_id in work_ids]
+    latest_start = max(item["start"]["time"] for item in work_intervals)
+    earliest_end = min(item["end"]["time"] for item in work_intervals)
+    assert latest_start < earliest_end, "independent worker intervals did not overlap"
+    serial_work = sum(
+        item["end"]["time"] - item["start"]["time"] for item in work_intervals
+    )
+    parallel_critical_path = max(
+        item["end"]["time"] for item in work_intervals
+    ) - min(item["start"]["time"] for item in work_intervals)
+    assert parallel_critical_path < serial_work * 0.75
+
+    integration_id = next(
+        task_id
+        for task_id, kind in mapping["node_kinds"].items()
+        if kind == "integration"
+    )
+    assert intervals[integration_id]["start"]["time"] >= max(
+        item["end"]["time"] for item in work_intervals
+    )
+    metrics_path = os.environ.get("HCA_PARALLEL_METRICS_OUT", "").strip()
+    if metrics_path:
+        Path(metrics_path).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "independent_workers": len(work_ids),
+                    "distinct_worker_profiles": len(
+                        {task.assignee for task in work_tasks}
+                    ),
+                    "distinct_worktrees": len(workdirs),
+                    "serial_work_seconds": serial_work,
+                    "parallel_critical_path_seconds": parallel_critical_path,
+                    "work_only_speedup": serial_work / parallel_critical_path,
+                    "overlap_seconds": earliest_end - latest_start,
+                    "dependency_fanin_after_parents": True,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     assert state.active_lease_credits() == 0.0
 
 
@@ -694,7 +1050,9 @@ def test_c1_stop_terminates_owned_worker_and_reconciles(
     store.set_state(spec.run_id, RunState.PLANNING)
     assert orch.plan(spec, store) == RunState.PLANNING
     store.set_state(spec.run_id, RunState.RUNNING)
-    orch._dispatch_tick(1)  # spawn one real idle worker, leave it running
+    mapping = orch._mapping(store, spec.run_id)
+    assert mapping is not None
+    orch._dispatch_tick(1, mapping["child_task_ids"])
 
     mapping = orch._mapping(store, spec.run_id)
     work_id = mapping["child_task_ids"][0]
@@ -759,7 +1117,9 @@ def test_c1_dead_worker_is_reclaimed_and_replaced_once(
     store.set_state(spec.run_id, RunState.PLANNING)
     orch.plan(spec, store)
     store.set_state(spec.run_id, RunState.RUNNING)
-    orch._dispatch_tick(1)
+    mapping = orch._mapping(store, spec.run_id)
+    assert mapping is not None
+    orch._dispatch_tick(1, mapping["child_task_ids"])
 
     mapping = orch._mapping(store, spec.run_id)
     work_id = mapping["child_task_ids"][0]
