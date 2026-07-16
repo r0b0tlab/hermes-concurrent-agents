@@ -181,6 +181,26 @@ def cmd_collect(args) -> int:
 
 
 def cmd_stop(args) -> int:
+    import sys
+
+    from hca.service import EXIT_INVALID, ServiceResult
+
+    # Honest confirmation gate: cancellation signals worker process groups, so
+    # it must be deliberate. Confirm interactively on a TTY; require --yes for
+    # automation (never fail open on a non-interactive stop).
+    if not getattr(args, "yes", False):
+        if sys.stdin.isatty():
+            ans = input(f"Cancel run {args.run_id}? Partial work is preserved. [y/N] ")
+            if ans.strip().lower() not in ("y", "yes"):
+                print("aborted; run not cancelled")
+                return EXIT_INVALID
+        else:
+            res = ServiceResult(
+                False, EXIT_INVALID, "stop", args.run_id, "authorization_required",
+                "stop requires confirmation",
+                "re-run with --yes to confirm cancellation (non-interactive)",
+            )
+            return _emit_service_result(res, args.json)
     svc = _service(args)
     res = svc.stop(args.run_id)
     return _emit_service_result(res, args.json)
@@ -822,6 +842,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_stop = sp.add_parser("stop", parents=[common], help="Cancel a run (preserves partial work)")
     p_stop.add_argument("run_id")
+    p_stop.add_argument(
+        "-y", "--yes", action="store_true",
+        help="confirm cancellation without an interactive prompt (required for "
+        "non-interactive/automation use)",
+    )
 
     p_task = sp.add_parser("task", parents=[common], help="Kanban task helpers")
     t_sp = p_task.add_subparsers(dest="task_cmd")

@@ -2,8 +2,10 @@
 
 Exactly five team tools are registered — no unrestricted command passthrough.
 Schemas are JSON-native and idempotency-aware; every tool result includes a
-``remediation`` string suitable for agent reasoning. Mutating tools honor
-Hermes approvals (``hca_team_stop`` is approval-gated).
+``remediation`` string suitable for agent reasoning. ``hca_team_stop`` is
+authorization-gated *by HCA itself* — the caller must restate the run id as
+``authorization`` — because Hermes does not enforce a tool's ``approval`` schema
+flag; the flag here is descriptive of the HCA-enforced gate, not a no-op.
 """
 
 from __future__ import annotations
@@ -109,14 +111,28 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "hca_team_stop": {
         "name": "hca_team_stop",
         "version": TOOLSET_VERSION,
-        "description": "Cancel a run (approval-gated). Marks stopping→cancelled, preserves partial work; never turns cancellation into completion.",
+        "description": (
+            "Cancel a run. Authorization-gated by HCA: you MUST pass "
+            "authorization equal to run_id to confirm — without it the run is "
+            "NOT cancelled. Signals worker process groups, marks "
+            "stopping→cancelled, preserves partial work; never turns "
+            "cancellation into completion."
+        ),
         "parameters": {
             "type": "object",
-            "properties": {"run_id": {"type": "string"}},
-            "required": ["run_id"],
+            "properties": {
+                "run_id": {"type": "string"},
+                "authorization": {
+                    "type": "string",
+                    "description": "must equal run_id to confirm cancellation",
+                },
+            },
+            "required": ["run_id", "authorization"],
         },
         "returns": _result_shape(),
         "mutating": True,
+        # HCA-enforced authorization (see hca.plugin_tools.hca_team_stop), not a
+        # reliance on Hermes to honour this flag.
         "approval": True,
     },
 }

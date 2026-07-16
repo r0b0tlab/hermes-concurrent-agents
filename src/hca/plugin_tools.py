@@ -79,11 +79,30 @@ def hca_team_respond(
 
 
 def hca_team_stop(
-    run_id: str = "", *, service: Optional[FleetService] = None
+    run_id: str = "",
+    authorization: str = "",
+    *,
+    service: Optional[FleetService] = None,
 ) -> dict[str, Any]:
-    # Approval-gating is enforced by the Hermes tool layer (schema.approval).
+    # Honest, code-enforced authorization gate. Hermes does NOT enforce a
+    # tool's ``approval`` schema flag, so a stop cannot rely on it. Instead HCA
+    # requires the caller to explicitly restate the run id as ``authorization``
+    # before a cancellation runs — a real confirmation that prevents an agent
+    # (or a mis-fired retry) from cancelling the wrong run. Cancellation kills
+    # worker process groups, so it must be deliberate.
     if not run_id:
         return _invalid("stop", "run_id is required")
+    if str(authorization).strip() != str(run_id).strip():
+        return ServiceResult(
+            False,
+            EXIT_INVALID,
+            "stop",
+            run_id,
+            "authorization_required",
+            "stop requires explicit authorization to cancel this run",
+            f're-call hca_team_stop with authorization="{run_id}" to confirm',
+            data={"authorization_required": True},
+        ).to_dict()
     return _service(service).stop(run_id).to_dict()
 
 

@@ -101,10 +101,28 @@ def test_needs_input_respond_parity(tmp_path):
 def test_stop_tool_preserves_cancel_semantics(tmp_path):
     svc = _svc(tmp_path, NeedsInput())
     started = hca_team_run("goal", service=svc)
-    stopped = hca_team_stop(started["run_id"], service=svc)
+    rid = started["run_id"]
+    stopped = hca_team_stop(rid, authorization=rid, service=svc)
     assert stopped["state"] == "cancelled"
-    collected = hca_team_collect(started["run_id"], service=svc)
+    collected = hca_team_collect(rid, service=svc)
     assert collected["data"]["result"]["outcome"] == "cancelled"
+
+
+def test_stop_tool_requires_explicit_authorization(tmp_path):
+    # Hermes does not enforce the schema `approval` flag, so HCA gates the stop
+    # in code: without authorization=run_id the run is NOT cancelled.
+    svc = _svc(tmp_path, NeedsInput())
+    started = hca_team_run("goal", service=svc)
+    rid = started["run_id"]
+    ungated = hca_team_stop(rid, service=svc)  # no authorization
+    assert not ungated["ok"]
+    assert ungated["data"].get("authorization_required") is True
+    # the run was left running, not cancelled
+    assert svc.status(rid).state != "cancelled"
+    # wrong authorization is also refused
+    assert not hca_team_stop(rid, authorization="nope", service=svc)["ok"]
+    # correct authorization cancels
+    assert hca_team_stop(rid, authorization=rid, service=svc)["state"] == "cancelled"
 
 
 def test_status_tool_lists_and_targets(tmp_path):
