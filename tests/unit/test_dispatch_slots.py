@@ -3,6 +3,7 @@
 import time
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 from hca.config import load_fleet_config
 from hca.kanban import _reconcile_owned_worker_identities, pick_idle_slot
@@ -136,4 +137,68 @@ def test_supervisor_replacement_budget_is_separate_and_bounded(tmp_path: Path):
         row["kind"] == "attempt.terminated"
         and row["data"]["termination_class"] == "worker_crash"
         for row in activities
+    )
+
+
+def test_dead_worker_with_terminal_upstream_truth_is_settled_not_reclaimed(
+    tmp_path: Path,
+):
+    cfg = load_fleet_config(model="m", state_dir=str(tmp_path))
+    state = StateDB(tmp_path / "hca.sqlite")
+    now = time.time()
+    state.upsert_run(
+        RunRecord(
+            board=cfg.board,
+            task_id="task-done",
+            run_id="7",
+            slot="slot-1",
+            node="local",
+            tmux_session="slot-1",
+            pid=999_999,
+            hermes_session_id=None,
+            workspace=None,
+            status="running",
+            started_at=now,
+            updated_at=now,
+            last_activity="spawned",
+            error=None,
+            pid_start_ticks=1,
+        )
+    )
+    reclaimed = []
+
+    class KB:
+        @staticmethod
+        def get_task(_conn, task_id):
+            assert task_id == "task-done"
+            return SimpleNamespace(status="done")
+
+        @staticmethod
+        def reclaim_task(_conn, task_id, **_kwargs):
+            reclaimed.append(task_id)
+            return True
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        result = _reconcile_owned_worker_identities(
+            KB,
+            conn,
+            cfg,
+            state,
+            owner_run_id="run-owner",
+            max_supervisor_replacements=2,
+            allowed_task_ids={"task-done"},
+        )
+    finally:
+        conn.close()
+
+    assert result == []
+    assert reclaimed == []
+    settled = state.latest_run_for_task(cfg.board, "task-done")
+    assert settled is not None and settled.status == "completed"
+    assert state.get_meta("supervisor_replacements:run-owner") == ""
+    assert any(
+        row["kind"] == "attempt.settled"
+        and row["data"]["termination_class"] == "task_terminal"
+        for row in state.recent_activity(10)
     )

@@ -208,6 +208,56 @@ def _reconcile_owned_worker_identities(
             continue
         if rec.pid_start_ticks is not None and current_ticks == rec.pid_start_ticks:
             continue
+        # Close the race where a worker commits terminal Kanban truth and exits
+        # after the controller's status snapshot but before this lower dispatch
+        # reconciliation. Reclaiming that already-completed task would reset it
+        # to ready and create a duplicate replacement attempt.
+        get_task = getattr(kb, "get_task", None)
+        task = get_task(conn, rec.task_id) if callable(get_task) else None
+        upstream_status = str(getattr(task, "status", "") or "")
+        if upstream_status in {
+            "done",
+            "archived",
+            "blocked",
+            "failed",
+            "crashed",
+            "timed_out",
+            "cancelled",
+        }:
+            mapped = (
+                "completed"
+                if upstream_status in {"done", "archived"}
+                else upstream_status
+            )
+            state.mark_run_status(
+                rec.board,
+                rec.run_id,
+                mapped,
+                error=(
+                    ""
+                    if mapped == "completed"
+                    else f"upstream task is {upstream_status}"
+                ),
+            )
+            release_worker_lease(state, board=rec.board, task_id=rec.task_id)
+            state.release_leases_by_owner(rec.task_id, kind="subagent")
+            state.set_activity(
+                kind="attempt.settled",
+                message=(
+                    f"settled dead worker {rec.run_id} from terminal upstream "
+                    f"status {upstream_status}"
+                ),
+                board=rec.board,
+                task_id=rec.task_id,
+                run_id=rec.run_id,
+                slot=rec.slot,
+                data={
+                    "owner_run_id": owner_run_id,
+                    "termination_class": "task_terminal",
+                    "upstream_status": upstream_status,
+                },
+            )
+            continue
         did_reclaim = kb.reclaim_task(
             conn,
             rec.task_id,
