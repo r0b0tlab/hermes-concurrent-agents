@@ -28,9 +28,9 @@ CHECKS = (
 )
 
 
-def _git_commit(root: Path) -> str:
+def _git_object(root: Path, object_name: str) -> str:
     result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
+        ["git", "rev-parse", "--verify", object_name],
         cwd=root,
         capture_output=True,
         text=True,
@@ -54,8 +54,9 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(args.out).expanduser() if args.out else root / ".hermes" / "acceptance" / f"orchestration-{stamp}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    hermes_src = Path(args.hermes_src).expanduser().resolve()
     env = os.environ.copy()
-    env["HCA_HERMES_SRC"] = str(Path(args.hermes_src).expanduser().resolve())
+    env["HCA_HERMES_SRC"] = str(hermes_src)
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="hca-acceptance-") as tmp:
         metrics_path = Path(tmp) / "parallel-metrics.json"
@@ -76,12 +77,16 @@ def main(argv: list[str] | None = None) -> int:
 
     passed = completed.returncode == 0 and bool(parallel_metrics)
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "suite": "hca-deterministic-orchestration",
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "git_commit": _git_commit(root),
+        "git_commit": _git_object(root, "HEAD"),
+        "git_tree": _git_object(root, "HEAD^{tree}"),
         "python": platform.python_version(),
         "hermes_contract_source": "installed-source-tree",
+        "hermes_contract_path": str(hermes_src),
+        "hermes_contract_commit": _git_object(hermes_src, "HEAD"),
+        "hermes_contract_tree": _git_object(hermes_src, "HEAD^{tree}"),
         "checks": list(CHECKS),
         "passed": passed,
         "pytest_exit_code": completed.returncode,

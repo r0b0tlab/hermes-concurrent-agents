@@ -62,3 +62,11 @@ def test_hardware_workflow_is_manual_and_never_publishes():
     assert "upload-artifact" not in text
     forbidden = ("twine upload", "gh release create", "git push", "docker push")
     assert not any(command in text for command in forbidden)
+
+
+def test_orchestration_acceptance_records_exact_source_provenance():
+    text = (ROOT / "scripts" / "run-orchestration-acceptance.py").read_text()
+    assert '"git_commit": _git_object(root, "HEAD")' in text
+    assert '"git_tree": _git_object(root, "HEAD^{tree}")' in text
+    assert '"hermes_contract_commit": _git_object(hermes_src, "HEAD")' in text
+    assert '"hermes_contract_tree": _git_object(hermes_src, "HEAD^{tree}")' in text
