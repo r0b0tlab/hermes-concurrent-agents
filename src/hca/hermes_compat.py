@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import contextlib
+import io
 import json
 import os
 import platform
@@ -30,6 +32,47 @@ from typing import Any, Callable, Optional
 
 class HermesCompatError(RuntimeError):
     """Raised when the installed Hermes cannot satisfy the HCA contract."""
+
+
+_IMPORT_WARNINGS: list[str] = []
+
+
+def _known_optional_plugin_diagnostic(line: str) -> bool:
+    low = line.lower()
+    return "plugin" in low and any(
+        marker in low
+        for marker in (
+            "optional",
+            "unavailable",
+            "missing dependency",
+            "missing optional",
+            "could not import",
+            "failed to import",
+        )
+    )
+
+
+def _import_module_with_clean_streams(name: str):
+    """Capture only known optional-plugin discovery noise during import."""
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            module = importlib.import_module(name)
+    finally:
+        for text, target in ((stdout.getvalue(), sys.stdout), (stderr.getvalue(), sys.stderr)):
+            for line in text.splitlines():
+                if _known_optional_plugin_diagnostic(line):
+                    if line not in _IMPORT_WARNINGS:
+                        _IMPORT_WARNINGS.append(line)
+                else:
+                    print(line, file=target)
+    return module
+
+
+def compatibility_import_warnings() -> list[str]:
+    """Known optional-plugin diagnostics captured from Hermes imports."""
+    return list(_IMPORT_WARNINGS)
 
 
 # ---------------------------------------------------------------------------
@@ -133,14 +176,14 @@ def hermes_version() -> str:
 
 def import_kanban_db():
     try:
-        return importlib.import_module("hermes_cli.kanban_db")
+        return _import_module_with_clean_streams("hermes_cli.kanban_db")
     except ImportError as exc:
         # Try adding common install path
         candidate = os.path.expanduser("~/.hermes/hermes-agent")
         if candidate not in sys.path and os.path.isdir(candidate):
             sys.path.insert(0, candidate)
             try:
-                return importlib.import_module("hermes_cli.kanban_db")
+                return _import_module_with_clean_streams("hermes_cli.kanban_db")
             except ImportError:
                 pass
         raise HermesCompatError(
@@ -151,7 +194,7 @@ def import_kanban_db():
 
 def import_profiles():
     try:
-        return importlib.import_module("hermes_cli.profiles")
+        return _import_module_with_clean_streams("hermes_cli.profiles")
     except ImportError as exc:
         raise HermesCompatError(
             f"cannot import hermes_cli.profiles ({exc}). Install Hermes Agent."

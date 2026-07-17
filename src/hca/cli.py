@@ -531,16 +531,46 @@ def cmd_inspect(args) -> int:
     state = _state(cfg)
     rec = resolve_run(state, args.target)
     if not rec:
-        print(f"no run for {args.target}", file=sys.stderr)
-        return 1
+        high_level = _service(args).store.get_run(args.target)
+        supplied_kind = "high_level_run_id" if high_level is not None else "unknown"
+        payload = {
+            "ok": False,
+            "code": 2,
+            "action": "inspect",
+            "target": args.target,
+            "expected_identifier": "worker task, attempt run, tmux session, or slot",
+            "supplied_identifier_kind": supplied_kind,
+            "message": f"no worker attempt found for {args.target}",
+            "remediation": (
+                f"use `hca run-status {args.target}` or `hca collect {args.target}` "
+                "for a high-level run"
+                if high_level is not None
+                else "list high-level runs with `hca run-status`; inspect worker identifiers from status runtime data"
+            ),
+        }
+        if args.json:
+            _print(payload, True)
+        else:
+            print(f"{payload['message']}\n  → {payload['remediation']}", file=sys.stderr)
+        return 2
     acts = [
         a
         for a in state.recent_activity(100)
         if a.get("run_id") == rec.get("run_id") or a.get("task_id") == rec.get("task_id")
     ]
-    out = {"run": rec, "activity": acts[:20], "capacity": fetch_capacity(cfg).to_dict()}
-    _print(out, True if args.json else False)
-    if not args.json:
+    out = {
+        "run": rec,
+        "activity": acts[:20],
+        "capacity": fetch_capacity(cfg).to_dict(),
+        "identifiers": {
+            "worker_attempt_run_id": rec.get("run_id"),
+            "task_id": rec.get("task_id"),
+            "high_level_run_note": "use hca run-status/collect for high-level run ids",
+        },
+    }
+    if args.json:
+        _print(out, True)
+    else:
         print(json.dumps(out, indent=2, default=str))
     return 0
 

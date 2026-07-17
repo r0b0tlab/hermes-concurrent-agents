@@ -16,11 +16,21 @@ class ProbeResult:
     ok: bool
     detail: str
     data: Optional[dict[str, Any]] = None
+    failure_kind: str = ""
 
 
-def _http_json(url: str, *, method: str = "GET", body: Optional[dict] = None, timeout: float = 10.0) -> Any:
+def _http_json(
+    url: str,
+    *,
+    method: str = "GET",
+    body: Optional[dict] = None,
+    timeout: float = 10.0,
+    api_key: str = "",
+) -> Any:
     data = None
     headers = {"Content-Type": "application/json", "User-Agent": "hca/2.0"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     if body is not None:
         data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -96,20 +106,52 @@ def safe_error_detail(error: object, endpoint: str, *, limit: int = 300) -> str:
     return detail[:limit]
 
 
-def probe_models(endpoint: str, expected_model: str = "", timeout: float = 10.0) -> ProbeResult:
+def _probe_exception(exc: Exception, endpoint: str, operation: str) -> ProbeResult:
+    if isinstance(exc, urllib.error.HTTPError) and exc.code in {401, 403}:
+        return ProbeResult(
+            False,
+            f"{operation} authentication failed (HTTP {exc.code})",
+            failure_kind="authentication",
+        )
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError)):
+        kind = "reachability"
+    elif isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)):
+        kind = "protocol"
+    else:
+        kind = "request"
+    return ProbeResult(
+        False,
+        f"{operation} probe failed: {safe_error_detail(exc, endpoint)}",
+        failure_kind=kind,
+    )
+
+
+def probe_models(
+    endpoint: str,
+    expected_model: str = "",
+    timeout: float = 10.0,
+    api_key: str = "",
+) -> ProbeResult:
     base = endpoint.rstrip("/")
     url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
     try:
-        data = _http_json(url, timeout=timeout)
+        data = _http_json(url, timeout=timeout, api_key=api_key)
         ids = [m.get("id", "") for m in data.get("data", [])]
         if expected_model and expected_model not in ids:
-            return ProbeResult(False, f"model {expected_model!r} not in /models ids={ids}", data)
+            return ProbeResult(
+                False,
+                f"model {expected_model!r} not in /models ids={ids}",
+                data,
+                "model_missing",
+            )
         return ProbeResult(True, f"/models ok ids={ids[:8]}", data)
     except Exception as exc:
-        return ProbeResult(False, f"models probe failed: {safe_error_detail(exc, endpoint)}")
+        return _probe_exception(exc, endpoint, "models")
 
 
-def probe_chat(endpoint: str, model: str, timeout: float = 30.0) -> ProbeResult:
+def probe_chat(
+    endpoint: str, model: str, timeout: float = 30.0, api_key: str = ""
+) -> ProbeResult:
     base = endpoint.rstrip("/")
     url = f"{base}/chat/completions" if base.endswith("/v1") else f"{base}/v1/chat/completions"
     body = {
@@ -119,7 +161,9 @@ def probe_chat(endpoint: str, model: str, timeout: float = 30.0) -> ProbeResult:
         "temperature": 0,
     }
     try:
-        data = _http_json(url, method="POST", body=body, timeout=timeout)
+        data = _http_json(
+            url, method="POST", body=body, timeout=timeout, api_key=api_key
+        )
         if "error" in data:
             return ProbeResult(False, f"chat error: {data['error']}", data)
         choices = data.get("choices") or []
@@ -140,10 +184,12 @@ def probe_chat(endpoint: str, model: str, timeout: float = 30.0) -> ProbeResult:
             return ProbeResult(False, "chat response has no text or reasoning content", data)
         return ProbeResult(True, f"chat ok ({text_field}): {content[:80]!r}", data)
     except Exception as exc:
-        return ProbeResult(False, f"chat probe failed: {safe_error_detail(exc, endpoint)}")
+        return _probe_exception(exc, endpoint, "chat")
 
 
-def probe_tools(endpoint: str, model: str, timeout: float = 45.0) -> ProbeResult:
+def probe_tools(
+    endpoint: str, model: str, timeout: float = 45.0, api_key: str = ""
+) -> ProbeResult:
     """Best-effort tool-calling probe; some local servers may not support tools."""
     base = endpoint.rstrip("/")
     url = f"{base}/chat/completions" if base.endswith("/v1") else f"{base}/v1/chat/completions"
@@ -169,7 +215,9 @@ def probe_tools(endpoint: str, model: str, timeout: float = 45.0) -> ProbeResult
         "temperature": 0,
     }
     try:
-        data = _http_json(url, method="POST", body=body, timeout=timeout)
+        data = _http_json(
+            url, method="POST", body=body, timeout=timeout, api_key=api_key
+        )
         if "error" in data:
             return ProbeResult(False, f"tools error: {data['error']}", data)
         msg = data.get("choices", [{}])[0].get("message", {})
@@ -179,4 +227,4 @@ def probe_tools(endpoint: str, model: str, timeout: float = 45.0) -> ProbeResult
         # Not all models honor tools; treat missing as soft fail
         return ProbeResult(False, "tools: no tool_calls in response (soft fail)", data)
     except Exception as exc:
-        return ProbeResult(False, f"tools probe failed: {safe_error_detail(exc, endpoint)}")
+        return _probe_exception(exc, endpoint, "tools")

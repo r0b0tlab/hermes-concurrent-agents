@@ -327,6 +327,32 @@ def test_status_unknown_run(tmp_path):
     svc = FleetService(_cfg(tmp_path), orchestrator=PreflightOrchestrator())
     res = svc.status("run-does-not-exist")
     assert res.code == EXIT_INVALID
+    assert "high-level HCA run id" in res.remediation
+
+
+def test_status_reports_timing_active_agents_and_stable_identifiers(tmp_path):
+    class RuntimeStatusOrchestrator(NeedsInputOrchestrator):
+        def runtime_status(self, spec, store):
+            return {
+                "active_agents": 2,
+                "agents": [{"task_id": "t1"}, {"task_id": "t2"}],
+                "supervisor_replacements": {"used": 1, "limit": 2},
+                "admission_wait_reasons": {"disk": 3},
+            }
+
+    svc = FleetService(_cfg(tmp_path), orchestrator=RuntimeStatusOrchestrator())
+    started = svc.run("goal", budgets={"wall_seconds": 60})
+
+    status = svc.status(started.run_id)
+
+    assert status.data["runtime"]["active_agents"] == 2
+    assert status.data["runtime"]["admission_wait_reasons"] == {"disk": 3}
+    timing = status.data["timing"]
+    assert timing["wall_budget_seconds"] == 60
+    assert timing["deadline_at"] > timing["created_at"]
+    assert 0 <= timing["remaining_seconds"] <= 60
+    assert status.data["identifiers"]["high_level_run_id"] == started.run_id
+    assert status.data["identifiers"]["collect_command"] == f"hca collect {started.run_id}"
 
 
 def test_resume_returns_existing_state(tmp_path):

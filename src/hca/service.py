@@ -605,6 +605,7 @@ class FleetService:
             return ServiceResult(
                 False, EXIT_INVALID, "status", run_id, "unknown",
                 f"unknown run {run_id}",
+                "status expects a high-level HCA run id; list valid ids with `hca run-status`",
             )
         # Reconcile the projection from live upstream Kanban truth.
         proj = self._reconcile_projection(run_id) or proj
@@ -803,6 +804,7 @@ class FleetService:
             return ServiceResult(
                 False, EXIT_INVALID, "collect", run_id, "unknown",
                 f"unknown run {run_id}",
+                "collect expects a high-level HCA run id; list valid ids with `hca run-status`",
             )
         code = EXIT_OK
         if result.outcome in ("blocked", "cancelled"):
@@ -989,9 +991,43 @@ class FleetService:
             code = EXIT_OK if ok else EXIT_BLOCKED
             remediation = "cancelled; collect partial work with `hca collect`"
         msg = message or f"run {proj.run_id} is {state.value}"
+        data: dict[str, Any] = {
+            "run": proj.to_dict(),
+            "identifiers": {
+                "high_level_run_id": proj.run_id,
+                "status_command": f"hca run-status {proj.run_id}",
+                "collect_command": f"hca collect {proj.run_id}",
+                "worker_attempt_note": "hca inspect expects a worker task/attempt/session identifier",
+            },
+        }
+        spec = self.store.get_spec(proj.run_id)
+        if spec is not None:
+            now = time.time()
+            deadline_at = spec.created_at + max(1, int(spec.budgets.wall_seconds))
+            terminal_at = proj.updated_at if state in {
+                RunState.COMPLETED,
+                RunState.FAILED,
+                RunState.CANCELLED,
+            } else now
+            data["timing"] = {
+                "created_at": spec.created_at,
+                "elapsed_seconds": max(0.0, terminal_at - spec.created_at),
+                "deadline_at": deadline_at,
+                "remaining_seconds": max(0.0, deadline_at - now),
+                "wall_budget_seconds": int(spec.budgets.wall_seconds),
+            }
+            runtime_status = getattr(self.orchestrator, "runtime_status", None)
+            if callable(runtime_status):
+                try:
+                    data["runtime"] = runtime_status(spec, self.store)
+                except Exception as exc:
+                    data["runtime"] = {
+                        "active_agents": None,
+                        "diagnostic_error": str(exc),
+                    }
         return ServiceResult(
             ok, code, action, proj.run_id, state.value, msg, remediation,
-            data={"run": proj.to_dict()},
+            data=data,
         )
 
 

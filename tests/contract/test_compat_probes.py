@@ -8,12 +8,35 @@ gateway. Live-install probes live in test_hermes_runtime.py.
 from __future__ import annotations
 
 import inspect
+import sys
 from dataclasses import dataclass, fields
 from typing import Optional
 
 import pytest
 
 from hca import hermes_compat as hc
+
+
+def test_optional_plugin_import_noise_is_structured_but_unknown_output_is_preserved(
+    monkeypatch, capsys
+):
+    marker = object()
+
+    def noisy_import(_name):
+        print("optional plugin unavailable: missing dependency demo")
+        print("unexpected import diagnostic", file=sys.stderr)
+        return marker
+
+    hc._IMPORT_WARNINGS.clear()
+    monkeypatch.setattr(hc.importlib, "import_module", noisy_import)
+
+    assert hc._import_module_with_clean_streams("hermes_cli.fake") is marker
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "unexpected import diagnostic\n"
+    assert hc.compatibility_import_warnings() == [
+        "optional plugin unavailable: missing dependency demo"
+    ]
 
 
 # --- synthetic Hermes surface matching the stable v0.18.2 contract ---------

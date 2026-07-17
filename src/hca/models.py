@@ -34,6 +34,7 @@ class BackendConfig:
     local_only: bool = True
     metrics_url: str = ""
     auxiliary_endpoint: str = ""
+    api_key_env: str = ""
 
     def base_url(self) -> str:
         return self.endpoint.rstrip("/")
@@ -47,6 +48,9 @@ class CapacityConfig:
     memory_low: float = 0.75
     disk_high: float = 0.90
     disk_low: float = 0.80
+    disk_min_free_gb: float = 20.0
+    disk_resume_free_gb: float = 25.0
+    disk_strict_percent: bool = False
     per_role_caps: dict[str, int] = field(default_factory=dict)
     reserve_retry_lane: int = 1
     launch_stagger_seconds: float = 1.5
@@ -147,6 +151,12 @@ class CapacitySnapshot:
     engine: str = ""
     healthy: bool = True
     detail: str = ""
+    reachable: Optional[bool] = None
+    capacity_pressure: Optional[bool] = None
+    generation_tokens_total: Optional[float] = None
+    sampled_at: Optional[float] = None
+    sample_window_seconds: Optional[float] = None
+    probable_no_progress: Optional[bool] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

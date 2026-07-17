@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 from hca.backends import openai_compat as oai
@@ -19,6 +21,7 @@ class AdmissionDecision:
     credits: float = 1.0
     capacity: Optional[CapacitySnapshot] = None
     device: Optional[dict] = None
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -27,6 +30,7 @@ class AdmissionDecision:
             "credits": self.credits,
             "capacity": self.capacity.to_dict() if self.capacity else None,
             "device": self.device,
+            "warnings": list(self.warnings),
         }
 
 
@@ -65,6 +69,32 @@ def _mem_hysteresis_gate(
     return False, ""
 
 
+def _disk_floor_gate(
+    state: StateDB,
+    free_mb: Optional[int],
+    minimum_gb: float,
+    resume_gb: float,
+) -> tuple[bool, str]:
+    """Absolute free-space floor with a separate reopen watermark."""
+    key = "admission_disk_floor_gate"
+    closed = state.get_meta(key, "0") == "1"
+    if free_mb is None:
+        if closed:
+            return True, "disk free space unknown while absolute floor gate is closed"
+        return False, ""
+    free_gb = free_mb / 1024.0
+    reopen_gb = max(minimum_gb, resume_gb)
+    if closed:
+        if free_gb >= reopen_gb:
+            state.set_meta(key, "0")
+            return False, ""
+        return True, f"disk free {free_gb:.1f} GiB; resume requires {reopen_gb:.1f} GiB"
+    if free_gb < minimum_gb:
+        state.set_meta(key, "1")
+        return True, f"disk free {free_gb:.1f} GiB < minimum reserve {minimum_gb:.1f} GiB"
+    return False, ""
+
+
 def estimate_task_credits(
     *,
     task_class: str = "batch",
@@ -84,19 +114,48 @@ def estimate_task_credits(
     return base
 
 
-def fetch_capacity(cfg: FleetConfig) -> CapacitySnapshot:
+def fetch_capacity(
+    cfg: FleetConfig, previous: Optional[CapacitySnapshot] = None
+) -> CapacitySnapshot:
     eng = cfg.backend.engine
+    api_key = os.environ.get(cfg.backend.api_key_env, "") if cfg.backend.api_key_env else ""
     if eng == Engine.VLLM:
-        return vllm_adapter.fetch_capacity(cfg.backend.endpoint, cfg.backend.metrics_url)
+        return vllm_adapter.fetch_capacity(
+            cfg.backend.endpoint,
+            cfg.backend.metrics_url,
+            api_key=api_key,
+            previous=previous,
+        )
     if eng == Engine.SGLANG:
-        return sglang_adapter.fetch_capacity(cfg.backend.endpoint, cfg.backend.metrics_url)
+        return sglang_adapter.fetch_capacity(
+            cfg.backend.endpoint,
+            cfg.backend.metrics_url,
+            api_key=api_key,
+            previous=previous,
+        )
     # generic: models probe only
-    pr = oai.probe_models(cfg.backend.endpoint, cfg.backend.model)
+    pr = oai.probe_models(cfg.backend.endpoint, cfg.backend.model, api_key=api_key)
     return CapacitySnapshot(
         engine=eng.value,
         healthy=pr.ok,
         detail=pr.detail,
+        reachable=pr.failure_kind != "reachability",
     )
+
+
+def diagnose_capacity_progress(
+    cfg: FleetConfig, *, sample_interval_seconds: float = 0.25
+) -> CapacitySnapshot:
+    """Take a bounded second sample only when progress telemetry can answer."""
+    first = fetch_capacity(cfg)
+    if (
+        first.reachable is not True
+        or first.active_sequences <= 0
+        or first.generation_tokens_total is None
+    ):
+        return first
+    time.sleep(max(0.0, min(2.0, sample_interval_seconds)))
+    return fetch_capacity(cfg, previous=first)
 
 
 def admit(
@@ -110,6 +169,7 @@ def admit(
     device_signals=None,
     capacity: Optional[CapacitySnapshot] = None,
     probe_backend: bool = False,
+    requested_disk_mb: int = 0,
 ) -> AdmissionDecision:
     cap_cfg: CapacityConfig = cfg.capacity
     # Hermes profiles own provider/model connectivity. Core HCA admission must
@@ -132,19 +192,50 @@ def admit(
         except Exception:
             dev = None
     dev_dict = dev.to_dict() if dev is not None else None
+    warnings: list[str] = []
     if dev is not None:
         blocked, reason = _mem_hysteresis_gate(
             state, dev.mem_pressure, cap_cfg.memory_high, cap_cfg.memory_low
         )
         if blocked:
             return AdmissionDecision(False, f"waiting: {reason}", credits, capacity, dev_dict)
-        if dev.disk_pressure is not None and dev.disk_pressure >= cap_cfg.disk_high:
+        blocked, reason = _disk_floor_gate(
+            state,
+            dev.disk_free_mb,
+            cap_cfg.disk_min_free_gb,
+            cap_cfg.disk_resume_free_gb,
+        )
+        if blocked:
+            return AdmissionDecision(False, f"waiting: {reason}", credits, capacity, dev_dict)
+        reserve_mb = int(max(0.0, cap_cfg.disk_min_free_gb) * 1024)
+        if (
+            requested_disk_mb > 0
+            and dev.disk_free_mb is not None
+            and requested_disk_mb > max(0, dev.disk_free_mb - reserve_mb)
+        ):
             return AdmissionDecision(
                 False,
-                f"waiting: disk pressure {dev.disk_pressure:.0%} >= high "
-                f"{cap_cfg.disk_high:.0%}",
-                credits, capacity, dev_dict,
+                "waiting: run disk budget does not fit above absolute reserve "
+                f"({requested_disk_mb} MiB requested, {dev.disk_free_mb} MiB free, "
+                f"{reserve_mb} MiB reserved)",
+                credits,
+                capacity,
+                dev_dict,
             )
+        if dev.disk_pressure is not None and dev.disk_pressure >= cap_cfg.disk_high:
+            detail = (
+                f"disk pressure {dev.disk_pressure:.1%} >= high {cap_cfg.disk_high:.1%}; "
+                f"free={((dev.disk_free_mb or 0) / 1024.0):.1f} GiB"
+            )
+            if cap_cfg.disk_strict_percent:
+                return AdmissionDecision(
+                    False,
+                    f"waiting: {detail}",
+                    credits,
+                    capacity,
+                    dev_dict,
+                )
+            warnings.append(detail)
 
     if capacity is not None and not capacity.healthy:
         return AdmissionDecision(
@@ -200,4 +291,5 @@ def admit(
             dev_dict,
         )
 
-    return AdmissionDecision(True, "admitted", credits, capacity, dev_dict)
+    reason = "admitted" if not warnings else "admitted with warning: " + "; ".join(warnings)
+    return AdmissionDecision(True, reason, credits, capacity, dev_dict, warnings)

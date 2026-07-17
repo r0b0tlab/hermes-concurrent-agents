@@ -94,6 +94,7 @@ def pre_reserve_ready(
     *,
     limit: int,
     allowed_task_ids: Optional[set[str]] = None,
+    requested_disk_mb: int = 0,
 ) -> list[str]:
     """Reserve concrete slots for ready, concretely-assigned free tasks.
 
@@ -149,6 +150,7 @@ def pre_reserve_ready(
             state,
             credits=1.0 + len(reserved),
             enforce_top_level_cap=False,
+            requested_disk_mb=requested_disk_mb,
         )
         if not decision.allowed:
             state.set_activity(
@@ -504,6 +506,7 @@ def dispatch_tick(
             reservations,
             limit=wave,
             allowed_task_ids=allowed_task_ids,
+            requested_disk_mb=max(0, int(kwargs.get("requested_disk_mb") or 0)),
         )
         spawn_fn = make_tmux_spawn_fn(
             cfg,

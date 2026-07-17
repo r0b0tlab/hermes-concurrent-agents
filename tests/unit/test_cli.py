@@ -2,7 +2,9 @@ import json
 
 import hca.cli as cli
 from hca.cli import build_parser, main
+from hca.config import load_fleet_config
 from hca.observe import redact_text
+from hca.service import FleetService, PreflightOrchestrator
 
 
 def test_parser_has_core_commands():
@@ -20,6 +22,31 @@ def test_redact():
 
 def test_main_presets_exit_zero():
     assert main(["presets"]) == 0
+
+
+def test_inspect_json_remediates_high_level_run_identifier(tmp_path, capsys):
+    cfg = load_fleet_config(model="m", state_dir=str(tmp_path))
+    service = FleetService(cfg, orchestrator=PreflightOrchestrator())
+    started = service.run("goal")
+
+    rc = main(
+        [
+            "inspect",
+            started.run_id,
+            "--state-dir",
+            str(tmp_path),
+            "--model",
+            "m",
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert rc == 2
+    assert captured.err == ""
+    assert payload["supplied_identifier_kind"] == "high_level_run_id"
+    assert "hca run-status" in payload["remediation"]
 
 
 def test_plan_json_never_serializes_connection_string(capsys):

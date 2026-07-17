@@ -682,6 +682,7 @@ class KanbanOrchestrator:
                         max_in_progress=wave,
                         owner_run_id=spec.run_id,
                         max_supervisor_replacements=spec.budgets.max_supervisor_replacements,
+                        requested_disk_mb=spec.budgets.max_disk_mb,
                         remaining_wall_seconds=self._remaining_wall_seconds(spec),
                     )
                     statuses = self._statuses(child_ids)
@@ -760,6 +761,7 @@ class KanbanOrchestrator:
             max_in_progress=wave,
             owner_run_id=spec.run_id,
             max_supervisor_replacements=spec.budgets.max_supervisor_replacements,
+            requested_disk_mb=spec.budgets.max_disk_mb,
             remaining_wall_seconds=self._remaining_wall_seconds(spec),
         )
         store.append_event(
@@ -810,6 +812,7 @@ class KanbanOrchestrator:
                 max_in_progress=wave,
                 owner_run_id=spec.run_id,
                 max_supervisor_replacements=spec.budgets.max_supervisor_replacements,
+                requested_disk_mb=spec.budgets.max_disk_mb,
                 remaining_wall_seconds=self._remaining_wall_seconds(spec),
             )
             statuses = self._statuses(child_ids)
@@ -1205,6 +1208,72 @@ class KanbanOrchestrator:
                 live.append(task_id)
         return live
 
+    def runtime_status(self, spec, store: RunStore) -> dict:
+        """Structured live status for one persisted high-level run graph."""
+        mapping = self._mapping(store, spec.run_id) or {}
+        child_ids = list(mapping.get("child_task_ids") or [])
+        statuses = self._statuses(child_ids) if child_ids else {}
+        now = time.time()
+        agents = []
+        for task_id in child_ids:
+            rec = self.state.latest_run_for_task(self.board, task_id)
+            if rec is None or rec.status != "running" or not self._run_record_is_live(rec):
+                continue
+            agents.append(
+                {
+                    "task_id": task_id,
+                    "attempt_run_id": rec.run_id,
+                    "profile": rec.slot,
+                    "pid": rec.pid,
+                    "started_at": rec.started_at,
+                    "elapsed_seconds": max(0.0, now - rec.started_at),
+                    "workspace": rec.workspace or "",
+                }
+            )
+
+        reason_counts: dict[str, int] = {}
+        child_set = set(child_ids)
+        for activity in self.state.recent_activity(1000):
+            if activity.get("kind") != "admission.wait":
+                continue
+            if activity.get("task_id") not in child_set:
+                continue
+            message = str(activity.get("message") or "").lower()
+            if "disk" in message:
+                code = "disk"
+            elif "memory" in message or "kv cache" in message:
+                code = "memory"
+            elif "sequence" in message:
+                code = "sequence_credit"
+            elif "role" in message:
+                code = "role_cap"
+            elif "backend" in message:
+                code = "backend"
+            else:
+                code = "other"
+            reason_counts[code] = reason_counts.get(code, 0) + 1
+
+        status_counts: dict[str, int] = {}
+        for status in statuses.values():
+            status_counts[status] = status_counts.get(status, 0) + 1
+        return {
+            "root_task_id": mapping.get("root_task_id", ""),
+            "child_task_ids": child_ids,
+            "active_agents": len(agents),
+            "agents": agents,
+            "task_status_counts": status_counts,
+            "supervisor_replacements": {
+                "used": int(
+                    self.state.get_meta(
+                        f"supervisor_replacements:{spec.run_id}", "0"
+                    )
+                    or "0"
+                ),
+                "limit": int(spec.budgets.max_supervisor_replacements),
+            },
+            "admission_wait_reasons": reason_counts,
+        }
+
     def _active_wave_count(
         self, child_ids: list[str], statuses: dict[str, str]
     ) -> int:
@@ -1245,6 +1314,7 @@ class KanbanOrchestrator:
         max_in_progress: int | None = None,
         owner_run_id: str = "",
         max_supervisor_replacements: int | None = None,
+        requested_disk_mb: int = 0,
         remaining_wall_seconds: int | None = None,
     ) -> dict:
         from hca.kanban import dispatch_tick
@@ -1266,6 +1336,7 @@ class KanbanOrchestrator:
             allowed_task_ids=set(allowed_task_ids),
             owner_run_id=owner_run_id,
             max_supervisor_replacements=max_supervisor_replacements,
+            requested_disk_mb=max(0, int(requested_disk_mb)),
             max_in_progress_per_profile=1,
             skip_sole_dispatcher_check=not self.enforce_sole_dispatcher,
         )
@@ -1881,6 +1952,7 @@ class KanbanOrchestrator:
                     max_in_progress=max(1, int(spec.concurrency or 1)),
                     owner_run_id=spec.run_id,
                     max_supervisor_replacements=spec.budgets.max_supervisor_replacements,
+                    requested_disk_mb=spec.budgets.max_disk_mb,
                     remaining_wall_seconds=self._remaining_wall_seconds(spec),
                 )
             except Exception:

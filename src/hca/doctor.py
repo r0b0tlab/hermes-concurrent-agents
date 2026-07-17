@@ -13,10 +13,11 @@ from hca.config import FleetConfig
 from hca.hermes_compat import (
     HermesCompatError,
     assert_dispatch_contract,
+    compatibility_import_warnings,
     compatibility_report,
     hermes_version,
 )
-from hca.resources import fetch_capacity
+from hca.resources import diagnose_capacity_progress
 from hca.ssh_exec import run_ssh
 from hca.tmux import TmuxManager
 
@@ -104,6 +105,15 @@ def run_doctor(cfg: FleetConfig, *, tools_probe: bool = False) -> DoctorReport:
                 "info",
             )
 
+    for index, warning in enumerate(compatibility_import_warnings(), start=1):
+        _add(
+            checks,
+            f"hermes.optional_plugin_import.{index}",
+            True,
+            warning,
+            "warn",
+        )
+
     # tmux
     tmux = shutil.which("tmux")
     if tmux:
@@ -136,20 +146,66 @@ def run_doctor(cfg: FleetConfig, *, tools_probe: bool = False) -> DoctorReport:
 
     # engine + model
     _add(checks, "backend.engine", True, cfg.backend.engine.value, "info")
+    api_key = os.environ.get(cfg.backend.api_key_env, "") if cfg.backend.api_key_env else ""
+    if cfg.backend.api_key_env and not api_key:
+        _add(
+            checks,
+            "backend.auth",
+            False,
+            f"configured credential environment variable {cfg.backend.api_key_env!r} is not set",
+        )
     if not cfg.backend.model:
         _add(checks, "backend.model", False, "model is empty — set --model or preset model")
     else:
-        pr = oai.probe_models(cfg.backend.endpoint, cfg.backend.model)
+        pr = oai.probe_models(
+            cfg.backend.endpoint,
+            cfg.backend.model,
+            api_key=api_key,
+        )
+        if pr.failure_kind == "authentication":
+            _add(checks, "backend.reachability", True, "endpoint returned an HTTP response", "info")
+            if not any(c.name == "backend.auth" for c in checks):
+                _add(checks, "backend.auth", False, pr.detail)
+        elif pr.failure_kind == "reachability":
+            _add(checks, "backend.reachability", False, pr.detail)
+        else:
+            _add(checks, "backend.reachability", True, "endpoint request completed", "info")
+            if not any(c.name == "backend.auth" for c in checks):
+                _add(checks, "backend.auth", True, "credential accepted or not required", "info")
         _add(checks, "backend.models", pr.ok, pr.detail)
         if pr.ok:
-            ch = oai.probe_chat(cfg.backend.endpoint, cfg.backend.model)
+            ch = oai.probe_chat(cfg.backend.endpoint, cfg.backend.model, api_key=api_key)
             _add(checks, "backend.chat", ch.ok, ch.detail, severity="error" if not ch.ok else "info")
             if tools_probe:
-                tp = oai.probe_tools(cfg.backend.endpoint, cfg.backend.model)
+                tp = oai.probe_tools(cfg.backend.endpoint, cfg.backend.model, api_key=api_key)
                 _add(checks, "backend.tools", tp.ok, tp.detail, severity="warn")
 
-    cap = fetch_capacity(cfg)
+    cap = diagnose_capacity_progress(cfg)
     _add(checks, "backend.capacity", cap.healthy, cap.detail, severity="warn" if not cap.healthy else "info")
+    if cap.probable_no_progress is True:
+        _add(
+            checks,
+            "backend.probable_no_progress",
+            True,
+            "active requests with zero generation-token delta across two samples; advisory only",
+            "warn",
+        )
+    elif cap.probable_no_progress is False:
+        _add(
+            checks,
+            "backend.probable_no_progress",
+            True,
+            "generation-token progress observed across two samples",
+            "info",
+        )
+    else:
+        _add(
+            checks,
+            "backend.probable_no_progress",
+            True,
+            "unknown: insufficient active-request or generation-token telemetry",
+            "info",
+        )
 
     # Device adapter selection (capability-driven; generic imports no vendor libs)
     try:

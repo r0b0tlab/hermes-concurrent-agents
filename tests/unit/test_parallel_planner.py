@@ -207,6 +207,7 @@ def test_recovery_tick_admits_only_remaining_requested_concurrency(
     assert kwargs["max_in_progress"] == 2
     assert kwargs["owner_run_id"] == spec.run_id
     assert kwargs["max_supervisor_replacements"] == 2
+    assert kwargs["requested_disk_mb"] == spec.budgets.max_disk_mb
     assert 1 <= kwargs["remaining_wall_seconds"] <= spec.budgets.wall_seconds
 
 

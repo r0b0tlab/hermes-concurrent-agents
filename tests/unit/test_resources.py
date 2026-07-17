@@ -9,7 +9,12 @@ def _healthy_cfg():
     # endpoint so the *device* path is what we exercise deterministically by
     # injecting device_signals and asserting the device reason wins first.
     return FleetConfig(
-        capacity=CapacityConfig(memory_high=0.90, memory_low=0.75, disk_high=0.90),
+        capacity=CapacityConfig(
+            memory_high=0.90,
+            memory_low=0.75,
+            disk_high=0.90,
+            disk_strict_percent=True,
+        ),
         backend=BackendConfig(engine=Engine.OPENAI_COMPAT, endpoint="http://127.0.0.1:9/v1"),
     )
 
@@ -38,6 +43,50 @@ def test_device_disk_high_blocks(tmp_path):
     sig = DeviceSignals(adapter="test", mem_pressure=0.1, disk_pressure=0.95)
     d = admit(cfg, db, device_signals=sig)
     assert not d.allowed and "disk pressure" in d.reason
+
+
+def test_large_disk_high_percentage_admits_with_absolute_free_space_warning(tmp_path):
+    db = StateDB(tmp_path / "s.sqlite")
+    cfg = _healthy_cfg()
+    cfg.capacity.disk_strict_percent = False
+    sig = DeviceSignals(
+        adapter="test",
+        mem_pressure=0.1,
+        disk_pressure=0.964,
+        disk_free_mb=138 * 1024,
+    )
+
+    decision = admit(cfg, db, device_signals=sig, requested_disk_mb=5 * 1024)
+
+    assert decision.allowed is True
+    assert "admitted with warning" in decision.reason
+    assert "138.0 GiB" in decision.warnings[0]
+
+
+def test_absolute_disk_floor_blocks_and_reopens_with_hysteresis(tmp_path):
+    db = StateDB(tmp_path / "s.sqlite")
+    cfg = _healthy_cfg()
+    cfg.capacity.disk_strict_percent = False
+    low = DeviceSignals(adapter="test", mem_pressure=0.1, disk_pressure=0.99, disk_free_mb=4 * 1024)
+    mid = DeviceSignals(adapter="test", mem_pressure=0.1, disk_pressure=0.50, disk_free_mb=22 * 1024)
+    high = DeviceSignals(adapter="test", mem_pressure=0.1, disk_pressure=0.50, disk_free_mb=26 * 1024)
+
+    assert not admit(cfg, db, device_signals=low).allowed
+    held = admit(cfg, db, device_signals=mid)
+    assert not held.allowed and "resume requires 25.0 GiB" in held.reason
+    assert admit(cfg, db, device_signals=high).allowed
+
+
+def test_run_disk_budget_must_fit_above_absolute_reserve(tmp_path):
+    db = StateDB(tmp_path / "s.sqlite")
+    cfg = _healthy_cfg()
+    cfg.capacity.disk_strict_percent = False
+    sig = DeviceSignals(adapter="test", mem_pressure=0.1, disk_pressure=0.1, disk_free_mb=24 * 1024)
+
+    decision = admit(cfg, db, device_signals=sig, requested_disk_mb=5 * 1024)
+
+    assert not decision.allowed
+    assert "does not fit above absolute reserve" in decision.reason
 
 
 def test_unknown_mem_pressure_does_not_block(tmp_path):
