@@ -39,6 +39,11 @@ by validated ready DAG width, requested concurrency, concrete free slots, role
 caps, active leases, configured sequence credits, memory hysteresis, disk
 headroom, and optional endpoint telemetry.
 
+Fleet high-level-run slots, worker attempts, sequence credits, task retries,
+supervisor replacements, and absolute deadlines are separate authorities. A
+recovery tick dispatches only remaining capacity and cannot expand the persisted
+task graph.
+
 Unknown telemetry is conservative unknown, never unlimited capacity. No
 universal worker count is encoded as a product claim.
 
@@ -62,6 +67,12 @@ live. Final state is derived from upstream terminal evidence, result/artifact
 handoff, required review, open questions, and exact worker liveness. Restart
 reconciliation releases stale claims/leases only after ownership checks and
 never signals a reused PID.
+
+Operator cancellation, deadline timeout, worker crash, supervisor replacement,
+and identity-isolation failure are recorded as distinct termination classes.
+Exact recovery preserves the canonical worktree and can reassign only to a
+configured concrete profile; it does not restart endpoints or mutate run
+concurrency.
 
 ## Remote boundary
 

@@ -87,6 +87,13 @@ A live drift guard (`test_worker_launch_contract.py`) asserts every emitted
 env key still appears in the installed `_default_spawn` source, so an upstream
 rename fails a test before it fails a fleet.
 
+HCA additionally removes all inherited `HERMES_SESSION_*` identity keys from
+the worker command environment and the retained tmux server environment. This
+prevents a Telegram/Discord/gateway session from being inherited by an
+otherwise isolated worker. Optional-plugin import diagnostics are captured only
+when they match known discovery/dependency warnings and are surfaced as
+structured doctor checks; unrelated stdout/stderr is never globally suppressed.
+
 ## Sole-dispatcher ownership
 
 For an HCA-owned board, the HCA supervisor must be the sole dispatcher. HCA

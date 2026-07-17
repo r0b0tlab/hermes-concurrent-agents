@@ -34,7 +34,18 @@ delete profiles or state as an upgrade strategy.
 ## State schema migration
 
 The current HCA SQLite schema is version `3`; run specifications use schema
-version `2`.
+version `4`; the Hermes plugin toolset schema is version `2`.
+
+Run-spec versions 1–2 load with `input_policy=allow` for compatibility. Version
+4 adds `max_supervisor_replacements` (default `2`) as a distinct infrastructure
+recovery budget. Existing task retry counters remain Hermes-owned and are not
+reinterpreted. New fleet capacity fields default to a 20 GiB disk reserve, a
+25 GiB reopen watermark, and advisory percentage pressure. Set
+`disk_strict_percent=true` to preserve legacy percentage-blocking behavior.
+
+Backend credentials remain Hermes/operator-owned. `backend.api_key_env` stores
+only an environment-variable name for read-only doctor probes; secret values
+are never serialized into fleet snapshots, status, or collection output.
 
 Opening HCA state applies ordered forward-only migrations. Before changing an
 existing database, HCA creates a WAL-consistent owner-only backup beside it:

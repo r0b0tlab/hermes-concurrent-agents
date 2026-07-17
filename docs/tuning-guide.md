@@ -14,6 +14,9 @@ max_top_level_runs = <knee>
 max_total_sequences = <knee>
 max_wave_size = 4
 launch_stagger_seconds = 1.5
+disk_min_free_gb = 20
+disk_resume_free_gb = 25
+disk_strict_percent = false
 ```
 
 ## Engine knobs (document, do not hardcode)
@@ -37,3 +40,13 @@ Fewer high-quality coder slots beat many thrashing ones. Keep orchestrator tools
 ## UMA
 
 Prefer lowering concurrency over automatic `drop_caches`. Manual flush only as recovery.
+
+## Separate limits
+
+- `max_top_level_runs` counts high-level HCA missions, not worker attempts.
+- `max_total_sequences` limits worker/subagent credits.
+- `RunSpec.concurrency` limits live owned workers in one mission, including
+  replacements.
+- `max_supervisor_replacements` bounds infrastructure recovery and does not
+  replace Hermes' consecutive task/model failure circuit breaker.
+- `max_disk_mb` must fit in current free space after the absolute reserve.

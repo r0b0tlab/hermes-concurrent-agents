@@ -18,12 +18,16 @@ starts or replaces a model server as part of this workflow.
 ```bash
 hca run-status <run-id>
 hca respond <run-id> <question-id> "answer"
+hca recover <run-id> <task-id> --idempotency-key <stable-key>
 hca collect <run-id>
 hca stop <run-id>
 ```
 
 - `run-status` reports task state, questions, exact ownership, and blockers.
 - `respond` answers one open question and resumes only that branch.
+- `recover` replaces one exact PID/start-tick-owned attempt, preserves its
+  worktree, and consumes the high-level run's supervisor replacement budget.
+  Reassignment is accepted only for an existing concrete fleet profile.
 - `collect` refuses empty or premature success and emits a deterministic SHA-256
   manifest.
 - `stop` persists `stopping`, signals exact owned groups, preserves partial work,
@@ -45,6 +49,17 @@ Set concurrency from exact workload evidence. Memory high/low watermarks use
 hysteresis; unavailable endpoint metrics retain the conservative configured
 sequence ceiling.
 
+Disk admission uses `disk_min_free_gb` as a hard reserve and
+`disk_resume_free_gb` as its reopen watermark. `disk_high` is advisory by
+default, because a large disk can be highly utilized while retaining ample
+absolute space; set `disk_strict_percent=true` only when percentage pressure
+must block. A run's `max_disk_mb` must fit above the hard reserve.
+
+`hca doctor --json` reports reachability, authentication, model availability,
+capacity pressure, and probable no-progress separately. No-progress requires
+two samples, active requests, and zero generation-token delta. It is advisory:
+HCA never restarts or kills an operator-owned endpoint from that signal.
+
 ## One dispatcher
 
 HCA establishes sole dispatcher ownership before creating any ready Kanban task.
@@ -58,10 +73,12 @@ do not let two controllers race claims.
 2. Verify the recorded PID and start ticks against live ownership.
 3. Restart the HCA controller/supervisor; reconciliation is preferred over
    manual SQLite or tmux edits.
-4. Answer a persisted question with `hca respond`, or cancel deliberately with
+4. For one exact crashed/stuck attempt, use `hca recover ... --idempotency-key`
+   after reviewing ownership and the remaining replacement budget.
+5. Answer a persisted question with `hca respond`, or cancel deliberately with
    `hca stop`.
-5. Preserve dirty/unmerged worktrees and collect partial evidence.
-6. Confirm zero active leases, live exact workers, and HCA-owned panes after a
+6. Preserve dirty/unmerged worktrees and collect partial evidence.
+7. Confirm zero active leases, live exact workers, and HCA-owned panes after a
    terminal run.
 
 Do not manually reset schema markers, delete SQLite WAL files, kill broad process
@@ -78,6 +95,7 @@ patterns, drop system caches, or destroy unrelated tmux sessions.
 | Blocked: no evidence | Worker completed without result/artifact evidence; inspect its upstream run summary/log |
 | Remote placement unsupported | Keep workers/Kanban local; configure only the model endpoint through Hermes |
 | Terminal task with live worker | Wait for or reconcile exact process cleanup; HCA must not report success yet |
+| `inspect` rejects a run id | `inspect` expects a worker task/attempt/session id; use `run-status` or `collect` for a high-level run id |
 
 ## Upgrade and uninstall
 

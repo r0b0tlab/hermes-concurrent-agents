@@ -24,7 +24,7 @@ result collection on top of your existing Hermes profiles.
 Do **not** reach for it for a single quick answer — a normal tool call is
 cheaper. Concurrency is an optimization, not a quota to fill.
 
-## The five team tools
+## The six team tools
 
 1. `hca_team_run(goal, project?, team?, concurrency?, idempotency_key?)` —
    submit a durable mission. Returns a `run_id` handle. **Always pass a stable
@@ -37,7 +37,12 @@ cheaper. Concurrency is an optimization, not a quota to fill.
    cancelled or blocked work as success.
 4. `hca_team_respond(run_id, question_id, response)` — answer a structured
    `needs_input` question. Only the matching blocked branch resumes.
-5. `hca_team_stop(run_id)` — cancel a run (approval-gated). Marks
+5. `hca_team_recover(run_id, task_id, idempotency_key, reassign_profile?, authorization)` —
+   approval-gated exact supervisor replacement. The authorization must equal
+   the run id; the idempotency key prevents duplicate replacement; reassignment
+   is limited to an existing fleet slot. It preserves the worktree and consumes
+   `max_supervisor_replacements`, not task retries.
+6. `hca_team_stop(run_id)` — cancel a run (approval-gated). Marks
    `stopping → cancelled`, preserves partial work, and never becomes a
    completion.
 
@@ -67,3 +72,14 @@ Check with `hca doctor --json` (`compat.dispatcher_ownership`).
 lane, and admission signals. HCA admits only safe, useful concurrency for the
 current device/endpoint; unknown telemetry is treated conservatively, never as
 infinite capacity.
+
+Disk percentage pressure is advisory by default. The hard gate is
+`disk_min_free_gb`, reopened at `disk_resume_free_gb`; `max_disk_mb` must fit
+above that reserve. Doctor separates endpoint reachability, authentication,
+capacity pressure, and two-sample probable no-progress. No-progress is advisory
+and never authorizes endpoint restart.
+
+Targeted status includes high-level timing/deadline, active agents, exact
+worker identifiers, replacement usage, and admission-wait reason counts.
+`hca inspect` expects a worker task/attempt/session identifier; use
+`hca run-status` or `hca collect` with a high-level run id.

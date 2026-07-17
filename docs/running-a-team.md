@@ -33,6 +33,7 @@ turned into a completion.
 | `hca run "<goal>"` | Start a durable mission; prints the run id and streams progress on a TTY. `--detach` returns immediately. |
 | `hca run-status [<id>]` | Run state, or a list of recent runs when the id is omitted. |
 | `hca respond <id> <question-id> "answer"` | Answer a `needs_input` question; resumes only the blocked branch. |
+| `hca recover <id> <task-id> --idempotency-key <key>` | Approval-sensitive exact worker replacement within the separate supervisor budget; optional `--reassign-profile` must name an existing fleet slot. |
 | `hca collect <id>` | Deterministic result manifest: outcome, evidence, artifacts, blockers, cleanup, SHA-256. |
 | `hca stop <id>` | Cancel a run; preserves partial work; marks `stopping → cancelled`. |
 
@@ -49,9 +50,9 @@ stable idempotency key so retries are safe.
 
 ## Human and agent parity
 
-The Hermes plugin exposes the same operations as five tools —
+The Hermes plugin exposes the same operations as six tools —
 `hca_team_run`, `hca_team_status`, `hca_team_collect`, `hca_team_respond`,
-and the approval-gated `hca_team_stop`. Both surfaces call the same typed
+and the approval-gated `hca_team_recover` and `hca_team_stop`. Both surfaces call the same typed
 service, so a human and a Hermes agent drive identical state transitions and
 receive the same result schema. See
 [the hca-operations skill](../src/hca/skills/hca-operations/SKILL.md).
@@ -62,3 +63,16 @@ Absent an admitted execution backend (a configured Hermes endpoint plus a
 running supervisor), `hca run` completes preflight and leaves the run
 `blocked` with a precise remediation rather than reporting fabricated success.
 Start the supervisor with `hca up` after configuring a Hermes profile/endpoint.
+
+## Run policy fields
+
+- `input_policy=allow` persists scoped questions; `fail_closed` terminates
+  autonomous runs rather than waiting invisibly.
+- `concurrency` is an immutable per-run ceiling over live owned workers,
+  including recovery waves.
+- `wall_seconds` is an absolute high-level deadline. Late tasks are clamped to
+  the remaining time and exact workers are stopped before deadline failure is
+  considered settled.
+- `max_supervisor_replacements` is separate from Hermes task/model retries.
+- A code task that claims `HCA_RESULT_COMMIT` is accepted only when the exact
+  40-hex commit exists and equals the recorded worktree HEAD/tree.

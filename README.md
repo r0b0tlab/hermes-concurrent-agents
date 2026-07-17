@@ -150,7 +150,7 @@ See [Security](docs/security.md), [Migration](docs/migration.md), and
 - [Support matrix](docs/support-matrix.md)
 - [Upstream compatibility](docs/upstream-compatibility.md)
 - [Operations and recovery](docs/operations.md)
-- [Migration and uninstall](docs/migration.md)
+- [Migration, schema compatibility, and uninstall](docs/migration.md)
 - [Security](docs/security.md)
 - [GB10 optimization](docs/backends-vllm-sglang.md)
 - [Remote-placement boundary](docs/gb10-cluster.md)
