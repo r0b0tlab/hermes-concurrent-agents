@@ -8,6 +8,7 @@ live install. A live drift-guard (skipped without hermes) asserts the real
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from typing import Optional
@@ -192,6 +193,45 @@ def test_hca_extra_env_merged(stub_helpers, tmp_path):
     env = spec.env()
     assert env["HCA_STATE_DB"] == "/x/hca.sqlite"
     assert env["HCA_MAX_SUBAGENT_CREDITS"] == "0"
+
+
+def test_parent_session_identity_cannot_be_reintroduced_by_extra_env(
+    stub_helpers, tmp_path
+):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    spec = build_worker_launch_spec(
+        FakeTask(),
+        str(ws),
+        board="hca",
+        hca_extra_env={
+            "HCA_STATE_DB": "/x/hca.sqlite",
+            "HERMES_SESSION_ID": "parent-session",
+            "HERMES_SESSION_CHAT_ID": "parent-chat",
+            "HERMES_SESSION_FUTURE_KEY": "must-not-leak",
+        },
+    )
+
+    env = spec.env()
+    assert env["HCA_STATE_DB"] == "/x/hca.sqlite"
+    assert not [key for key in env if key.startswith("HERMES_SESSION_")]
+
+
+def test_worker_unset_env_removes_complete_session_prefix(monkeypatch):
+    monkeypatch.setenv("HERMES_SESSION_ID", "parent")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "chat")
+    monkeypatch.setenv("HERMES_SESSION_FUTURE_KEY", "future")
+
+    keys = wl.worker_unset_env()
+
+    assert "HERMES_TUI" in keys
+    expected = {key for key in os.environ if key.startswith("HERMES_SESSION_")}
+    assert {key for key in keys if key.startswith("HERMES_SESSION_")} == expected
+    assert {
+        "HERMES_SESSION_ID",
+        "HERMES_SESSION_CHAT_ID",
+        "HERMES_SESSION_FUTURE_KEY",
+    } <= expected
 
 
 # --- live drift guard against the real _default_spawn contract --------------

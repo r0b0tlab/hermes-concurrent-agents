@@ -209,7 +209,8 @@ finally:
 
 
 _PARALLEL_WORKER_SRC = r"""
-import fcntl, json, os, sys, time
+import fcntl, json, os, subprocess, sys, time
+from pathlib import Path
 sys.path.insert(0, os.environ["HCA_WORKER_HERMES_SRC"])
 from hermes_cli import kanban_db as kb
 kb._fire_kanban_lifecycle_hook = lambda *args, **kwargs: None
@@ -249,12 +250,28 @@ if title.startswith("Integrate"):
     if len(parents) != 2 or not all(result for _, result in parents):
         raise RuntimeError("integration did not receive both parent results")
 emit("end")
+result = f"completed {title}; parent_results={len(parents)}"
+if title.startswith("Independent work slice"):
+    output = Path(f"{tid}.txt")
+    output.write_text(f"accepted output from {tid}\n", encoding="utf-8")
+    subprocess.run(["git", "add", output.name], check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", f"complete {tid}"],
+        check=True,
+    )
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    result = f"HCA_RESULT_COMMIT: {commit}\ncompleted {title}"
 conn = kb.connect(board=os.environ.get("HERMES_KANBAN_BOARD") or None)
 try:
     if not kb.complete_task(
         conn,
         tid,
-        result=f"completed {title}; parent_results={len(parents)}",
+        result=result,
         summary="deterministic parallel acceptance worker",
         expected_run_id=rid,
     ):
@@ -622,6 +639,14 @@ def test_parallel_acceptance_uses_distinct_workers_worktrees_and_real_overlap(
     assert len(workdirs) == 2
     assert all("/.worktrees/" in workdir for workdir in workdirs)
     assert all(Path(workdir).is_dir() for workdir in workdirs)
+
+    collected = svc.collect(result.run_id).data["result"]
+    artifacts = collected["artifacts"]
+    assert len([artifact for artifact in artifacts if artifact["kind"] == "git_commit"]) == 2
+    assert len([artifact for artifact in artifacts if artifact["kind"] == "git_tree"]) == 2
+    assert {
+        artifact["ref"] for artifact in artifacts if artifact["kind"] == "worktree"
+    } == workdirs
 
     rows = [json.loads(line) for line in interval_log.read_text().splitlines()]
     intervals = {}

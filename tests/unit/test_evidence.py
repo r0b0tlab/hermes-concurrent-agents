@@ -78,6 +78,43 @@ def test_needs_input_with_live_owned_worker_stays_running_until_reaped():
     assert "exact process cleanup" in reason
 
 
+def test_needs_input_allow_policy_remains_operator_resumable():
+    ev = ExecutionEvidence(
+        root_task_id="t1",
+        tasks=[
+            _done_task(
+                terminal_status="blocked",
+                block_kind="needs_input",
+                block_reason="which target?",
+            )
+        ],
+    )
+
+    state, reason = derive_final_state(_spec(input_policy="allow"), ev)
+
+    assert state == RunState.NEEDS_INPUT
+    assert reason == "which target?"
+
+
+def test_needs_input_fail_closed_policy_is_terminal_failure():
+    ev = ExecutionEvidence(
+        root_task_id="t1",
+        tasks=[
+            _done_task(
+                terminal_status="blocked",
+                block_kind="needs_input",
+                block_reason="which target?",
+            )
+        ],
+    )
+
+    state, reason = derive_final_state(_spec(input_policy="fail_closed"), ev)
+
+    assert state == RunState.FAILED
+    assert "input_policy=fail_closed" in reason
+    assert "which target?" in reason
+
+
 def test_done_without_run_id_is_not_completion():
     ev = ExecutionEvidence(root_task_id="t1", tasks=[_done_task(run_id=None)])
     state, reason = derive_final_state(_spec(), ev)

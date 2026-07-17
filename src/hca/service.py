@@ -158,6 +158,7 @@ class FleetService:
         team: str = "default",
         concurrency: int = 1,
         review_policy: str = "auto",
+        input_policy: str = "allow",
         source_profiles: Optional[list[str]] = None,
         budgets: Optional[dict] = None,
         idempotency_key: str = "",
@@ -224,6 +225,17 @@ class FleetService:
                 "concurrency must be >= 1",
             )
 
+        if input_policy not in {"allow", "fail_closed"}:
+            return ServiceResult(
+                False,
+                EXIT_INVALID,
+                "run",
+                "",
+                "invalid",
+                f"invalid input_policy {input_policy!r}",
+                "choose allow or fail_closed",
+            )
+
         raw_budgets = dict(budgets or {})
         known_budgets = set(RunBudgets().to_dict())
         unknown_budgets = sorted(set(raw_budgets) - known_budgets)
@@ -286,6 +298,7 @@ class FleetService:
             team=team,
             concurrency=int(concurrency),
             review_policy=review_policy,
+            input_policy=input_policy,
             budgets=parsed_budgets,
             idempotency_key=idempotency_key,
             board=self.cfg.board,
@@ -303,9 +316,17 @@ class FleetService:
             self.store.set_state(spec.run_id, RunState.PLANNING, reason="planning")
             planned = self.orchestrator.plan(spec, self.store)
             if planned == RunState.NEEDS_INPUT:
-                self.store.set_state(
-                    spec.run_id, RunState.NEEDS_INPUT, reason="planner needs input"
+                target = (
+                    RunState.FAILED
+                    if spec.input_policy == "fail_closed"
+                    else RunState.NEEDS_INPUT
                 )
+                reason = (
+                    "input_policy=fail_closed rejected planner input request"
+                    if target == RunState.FAILED
+                    else "planner needs input"
+                )
+                self.store.set_state(spec.run_id, target, reason=reason)
             elif planned == RunState.BLOCKED:
                 proj_now = self.store.get_run(spec.run_id)
                 if proj_now is not None and proj_now.state != RunState.BLOCKED:
@@ -709,6 +730,70 @@ class FleetService:
             code, "collect", run_id, result.state, result.summary,
             data={"result": result.to_dict()},
         )
+
+    # --- deadline expiry / stop ---
+
+    def expire(self, run_id: str) -> ServiceResult:
+        """Fail a run at its wall deadline after exact worker cleanup.
+
+        This is not operator cancellation: the terminal outcome is ``failed``.
+        If any owned worker cannot be proven gone, the run remains visibly
+        blocked instead of claiming a complete deadline cleanup.
+        """
+        proj = self.store.get_run(run_id)
+        if proj is None:
+            return ServiceResult(
+                False, EXIT_INVALID, "expire", run_id, "unknown",
+                f"unknown run {run_id}",
+            )
+        if proj.state in (RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED):
+            return self._status_result("expire", proj)
+
+        reason = "wall-time deadline exhausted; partial evidence preserved"
+        self.store.append_event(
+            run_id,
+            "run.controller_budget_exhausted",
+            "controller wall-time budget exhausted",
+        )
+        try:
+            self.store.set_state(run_id, RunState.STOPPING, reason="deadline cleanup")
+            spec = self.store.get_spec(run_id)
+            deadline_cleanup = getattr(self.orchestrator, "expire", None)
+            if not callable(deadline_cleanup):
+                deadline_cleanup = getattr(self.orchestrator, "cancel", None)
+            if callable(deadline_cleanup) and spec is not None:
+                deadline_cleanup(spec, self.store)
+            project = getattr(self.orchestrator, "project", None)
+            if callable(project) and spec is not None:
+                evidence = project(spec, self.store)
+                if isinstance(evidence, ExecutionEvidence):
+                    self.store.append_event(
+                        run_id,
+                        "run.deadline_evidence",
+                        "partial evidence captured after deadline cleanup",
+                        {"evidence": evidence.to_dict()},
+                    )
+            self.store.set_state(run_id, RunState.FAILED, reason=reason)
+        except Exception as exc:
+            blocked_reason = f"deadline cancellation incomplete: {exc}"
+            self.store.append_event(
+                run_id,
+                "run.cancel_incomplete",
+                blocked_reason,
+            )
+            self.store.set_state(run_id, RunState.BLOCKED, reason=blocked_reason)
+
+        refreshed = self.store.get_run(run_id)
+        if refreshed is None:  # pragma: no cover - state-store invariant guard
+            return ServiceResult(
+                False,
+                EXIT_RUNTIME,
+                "expire",
+                run_id,
+                "unknown",
+                "run projection disappeared during deadline cleanup",
+            )
+        return self._status_result("expire", refreshed)
 
     # --- stop ---
 

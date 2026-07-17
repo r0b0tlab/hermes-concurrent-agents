@@ -247,6 +247,46 @@ def test_stop_failure_blocks_instead_of_claiming_cancellation(tmp_path):
     assert "cancellation incomplete" in stopped.data["run"]["reason"]
 
 
+class DeadlineOrchestrator(NeedsInputOrchestrator):
+    def __init__(self):
+        self.cancelled = False
+
+    def cancel(self, spec, store):
+        self.cancelled = True
+        store.append_event(
+            spec.run_id,
+            "task.partial_evidence",
+            "partial worker output preserved before deadline cleanup",
+        )
+        return "deadline workers terminated"
+
+
+def test_deadline_expiry_cancels_exact_workers_before_failed_state(tmp_path):
+    orchestrator = DeadlineOrchestrator()
+    svc = FleetService(_cfg(tmp_path), orchestrator=orchestrator)
+    started = svc.run("bounded goal")
+    assert started.state == "needs_input"
+
+    expired = svc.expire(started.run_id)
+
+    assert orchestrator.cancelled is True
+    assert expired.state == "failed"
+    assert "wall-time deadline exhausted" in expired.data["run"]["reason"]
+    events = svc.store.list_events(started.run_id)
+    assert any(event["kind"] == "run.controller_budget_exhausted" for event in events)
+    assert any(event["kind"] == "task.partial_evidence" for event in events)
+
+
+def test_deadline_expiry_blocks_when_exact_cancellation_is_incomplete(tmp_path):
+    svc = FleetService(_cfg(tmp_path), orchestrator=CancellationFailureOrchestrator())
+    started = svc.run("bounded goal")
+
+    expired = svc.expire(started.run_id)
+
+    assert expired.state == "blocked"
+    assert "deadline cancellation incomplete" in expired.data["run"]["reason"]
+
+
 def test_terminal_detached_status_never_restarts_controller(tmp_path, monkeypatch):
     svc = FleetService(_cfg(tmp_path), orchestrator=CompletingOrchestrator())
     res = svc.run("goal")

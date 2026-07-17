@@ -66,6 +66,25 @@ def test_admit_respects_top_level_cap(tmp_path):
     assert d.allowed is False
 
 
+def test_worker_attempt_admission_does_not_consume_top_level_mission_cap(tmp_path):
+    db = StateDB(tmp_path / "s.sqlite")
+    cfg = FleetConfig(
+        capacity=CapacityConfig(max_top_level_runs=1, max_total_sequences=10),
+        backend=BackendConfig(engine=Engine.OPENAI_COMPAT),
+    )
+    sig = DeviceSignals(adapter="test", mem_pressure=None, disk_pressure=None)
+
+    decision = admit(
+        cfg,
+        db,
+        running_top_level=1,
+        enforce_top_level_cap=False,
+        device_signals=sig,
+    )
+
+    assert decision.allowed is True
+
+
 def test_core_admission_does_not_probe_profile_owned_endpoint(tmp_path, monkeypatch):
     db = StateDB(tmp_path / "s.sqlite")
     cfg = _healthy_cfg()

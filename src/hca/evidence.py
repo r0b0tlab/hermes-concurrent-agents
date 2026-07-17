@@ -177,6 +177,12 @@ def derive_final_state(
     ]
     if needs_input:
         t = needs_input[0]
+        if spec.input_policy == "fail_closed":
+            detail = t.block_reason or f"task {t.task_id} requested operator input"
+            return RunState.FAILED, (
+                "input_policy=fail_closed rejected unresolved operator input: "
+                f"{detail}"
+            )
         return RunState.NEEDS_INPUT, (
             t.block_reason
             or f"task {t.task_id} needs operator input before it can continue"

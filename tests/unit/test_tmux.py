@@ -52,3 +52,35 @@ def test_run_in_slot_can_remove_inherited_tui_mode(monkeypatch):
         assert "HERMES_TUI=unset" in text
     finally:
         tm.kill_session(name)
+
+
+@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux missing")
+def test_server_and_worker_strip_all_parent_session_identity(monkeypatch):
+    monkeypatch.setenv("HERMES_SESSION_ID", "parent-session")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "parent-chat")
+    monkeypatch.setenv("HERMES_SESSION_FUTURE_KEY", "parent-future")
+    socket = f"hca-test-session-env-{uuid.uuid4().hex[:8]}"
+    tm = TmuxManager(socket=socket)
+    name = "hca-test-session-env-slot"
+    try:
+        tm.create_slot(name)
+        tm.run_in_slot(
+            name,
+            "env | grep '^HERMES_SESSION_' || printf 'NO_SESSION_IDENTITY\\n'; sleep 30",
+            unset_env=[
+                "HERMES_SESSION_ID",
+                "HERMES_SESSION_CHAT_ID",
+                "HERMES_SESSION_FUTURE_KEY",
+            ],
+        )
+        text = ""
+        for _ in range(20):
+            text = tm.capture_pane(name, lines=10)
+            if "NO_SESSION_IDENTITY" in text:
+                break
+            time.sleep(0.05)
+        assert "NO_SESSION_IDENTITY" in text
+        server_env = tm._cmd("show-environment", "-g", check=False).stdout
+        assert "HERMES_SESSION_" not in server_env
+    finally:
+        tm.kill_session(name)

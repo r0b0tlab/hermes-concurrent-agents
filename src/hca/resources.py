@@ -105,6 +105,7 @@ def admit(
     *,
     credits: float = 1.0,
     running_top_level: Optional[int] = None,
+    enforce_top_level_cap: bool = True,
     task_class: str = "batch",
     device_signals=None,
     capacity: Optional[CapacitySnapshot] = None,
@@ -150,17 +151,18 @@ def admit(
             False, f"waiting: backend unhealthy ({capacity.detail})", credits, capacity, dev_dict
         )
 
-    running = running_top_level
-    if running is None:
-        running = len(state.list_runs(status="running"))
-    if running >= cap_cfg.max_top_level_runs:
-        return AdmissionDecision(
-            False,
-            f"waiting: top-level run cap {running}/{cap_cfg.max_top_level_runs}",
-            credits,
-            capacity,
-            dev_dict,
-        )
+    if enforce_top_level_cap:
+        running = running_top_level
+        if running is None:
+            running = len(state.list_runs(status="running"))
+        if running >= cap_cfg.max_top_level_runs:
+            return AdmissionDecision(
+                False,
+                f"waiting: top-level run cap {running}/{cap_cfg.max_top_level_runs}",
+                credits,
+                capacity,
+                dev_dict,
+            )
 
     leased = state.active_lease_credits()
     if leased + credits > cap_cfg.max_total_sequences:

@@ -21,7 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
-RUN_SCHEMA_VERSION = 2
+RUN_SCHEMA_VERSION = 3
 
 
 class RunState(str, Enum):
@@ -109,6 +109,7 @@ class RunSpec:
     team: str = "default"
     concurrency: int = 1
     review_policy: str = "auto"  # auto | always | never
+    input_policy: str = "allow"  # allow | fail_closed
     budgets: RunBudgets = field(default_factory=RunBudgets)
     idempotency_key: str = ""
     board: str = "hca"
@@ -137,6 +138,7 @@ class RunSpec:
             team=d.get("team", "default"),
             concurrency=int(d.get("concurrency", 1)),
             review_policy=d.get("review_policy", "auto"),
+            input_policy=d.get("input_policy", "allow"),
             budgets=RunBudgets.from_dict(d.get("budgets")),
             idempotency_key=d.get("idempotency_key", ""),
             board=d.get("board", "hca"),

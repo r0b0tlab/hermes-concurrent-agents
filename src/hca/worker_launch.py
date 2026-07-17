@@ -39,6 +39,17 @@ class WorkerLaunchError(RuntimeError):
     """Raised when a worker cannot be launched safely (fail before claim)."""
 
 
+SESSION_ENV_PREFIX = "HERMES_SESSION_"
+
+
+def worker_unset_env(environ: Optional[dict[str, str]] = None) -> list[str]:
+    """Return parent UI/session keys that detached workers must not inherit."""
+    source = os.environ if environ is None else environ
+    return sorted(
+        {"HERMES_TUI", *(key for key in source if key.startswith(SESSION_ENV_PREFIX))}
+    )
+
+
 # ---------------------------------------------------------------------------
 # Probed Hermes helper accessors (contained fallbacks)
 # ---------------------------------------------------------------------------
@@ -201,7 +212,13 @@ class WorkerLaunchSpec:
         env["HERMES_KANBAN_BOARD"] = self.board
         env["HERMES_PROFILE"] = self.profile
         # HCA plugin ledger env (subagent budget etc.)
-        env.update(self.hca_extra_env)
+        env.update(
+            {
+                key: value
+                for key, value in self.hca_extra_env.items()
+                if not key.startswith(SESSION_ENV_PREFIX)
+            }
+        )
         return env
 
     def argv(self) -> list[str]:

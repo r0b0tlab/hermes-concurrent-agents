@@ -178,6 +178,7 @@ def cmd_run(args) -> int:
         team=getattr(args, "team", "default") or "default",
         concurrency=int(getattr(args, "concurrency", 1) or 1),
         review_policy=getattr(args, "review", "auto") or "auto",
+        input_policy=getattr(args, "input_policy", "allow") or "allow",
         budgets=budgets,
         idempotency_key=getattr(args, "idempotency_key", "") or "",
         resume=getattr(args, "resume", "") or "",
@@ -883,6 +884,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--team", default="default", choices=["default", "small", "reviewed"])
     p_run.add_argument("--concurrency", type=int, default=1)
     p_run.add_argument("--review", default="auto", choices=["auto", "always", "never"])
+    p_run.add_argument(
+        "--input-policy",
+        default="allow",
+        choices=["allow", "fail_closed"],
+        help="pause for operator input or fail autonomous runs closed",
+    )
     p_run.add_argument("--idempotency-key", dest="idempotency_key", default="")
     p_run.add_argument("--resume", default="", help="resume/inspect an existing run id")
     p_run.add_argument("--detach", action="store_true", help="return the run id immediately")

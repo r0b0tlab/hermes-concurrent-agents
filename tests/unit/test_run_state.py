@@ -47,6 +47,7 @@ def test_runspec_roundtrip():
         constraints=("no network",),
         acceptance_criteria=("tests pass", "docs complete"),
         independent_criteria=True,
+        input_policy="fail_closed",
         budgets=RunBudgets(max_workers=2),
         idempotency_key="k1",
     )
@@ -55,6 +56,7 @@ def test_runspec_roundtrip():
     assert back == spec
     assert back.budgets.max_workers == 2
     assert back.independent_criteria is True
+    assert back.input_policy == "fail_closed"
 
 
 def test_runspec_v1_defaults_to_no_inferred_independence():
@@ -62,6 +64,7 @@ def test_runspec_v1_defaults_to_no_inferred_independence():
         {"run_id": "legacy", "goal": "g", "schema_version": 1}
     )
     assert legacy.independent_criteria is False
+    assert legacy.input_policy == "allow"
     assert legacy.schema_version == 1
 
 

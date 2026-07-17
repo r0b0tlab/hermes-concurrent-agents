@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+import re
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -69,6 +70,64 @@ PlannerFn = Callable[["FleetConfig", object, str, str], list[TaskNode]]
 
 # Upstream review-column status → an independent reviewer ran.
 _REVIEW_STATUSES = frozenset({"review"})
+
+
+_RESULT_COMMIT_RE = re.compile(r"HCA_RESULT_COMMIT: ([0-9a-f]{40}|[0-9a-f]{64})")
+
+
+def validate_git_result(task, result: str) -> tuple[bool, str, list[Artifact]]:
+    """Bind a worker's claimed result to the exact recorded worktree HEAD."""
+    first = next((line.strip() for line in (result or "").splitlines() if line.strip()), "")
+    match = _RESULT_COMMIT_RE.fullmatch(first)
+    if match is None:
+        return (
+            False,
+            "project result first non-empty line must be exactly "
+            "HCA_RESULT_COMMIT: <commit-oid>",
+            [],
+        )
+    commit = match.group(1)
+    workspace = getattr(task, "workspace_path", None)
+    if not workspace:
+        return False, "project result has no recorded workspace_path", []
+    try:
+        root = Path(str(workspace)).expanduser().resolve(strict=True)
+    except OSError:
+        return False, "recorded project workspace does not exist", []
+
+    def git(*args: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return completed.stdout.strip()
+
+    try:
+        git("cat-file", "-e", f"{commit}^{{commit}}")
+    except (OSError, subprocess.SubprocessError):
+        return False, f"claimed commit {commit} does not exist in recorded workspace", []
+    try:
+        head = git("rev-parse", "--verify", "HEAD")
+        tree = git("rev-parse", "--verify", f"{commit}^{{tree}}")
+        actual_root = Path(git("rev-parse", "--show-toplevel")).resolve(strict=True)
+    except (OSError, subprocess.SubprocessError):
+        return False, "could not resolve claimed commit tree from recorded workspace", []
+    if head != commit:
+        return False, f"claimed commit {commit} is not workspace HEAD {head}", []
+    if actual_root != root:
+        return False, "recorded workspace_path is not the Git worktree root", []
+    return (
+        True,
+        "",
+        [
+            Artifact(name="workspace", kind="worktree", ref=str(root)),
+            Artifact(name="result-commit", kind="git_commit", ref=commit),
+            Artifact(name="result-tree", kind="git_tree", ref=tree),
+        ],
+    )
 
 
 def default_planner(
@@ -612,8 +671,12 @@ class KanbanOrchestrator:
                 ):
                     terminal = True
                     break
-                if self._active_wave_count(child_ids, before_dispatch) < wave:
-                    self._dispatch_tick(wave, child_ids)
+                active_wave = self._active_wave_count(child_ids, before_dispatch)
+                remaining = max(0, wave - active_wave)
+                if remaining:
+                    self._dispatch_tick(
+                        remaining, child_ids, max_in_progress=wave
+                    )
                     statuses = self._statuses(child_ids)
             except HermesCompatError as exc:
                 return ExecutionEvidence(
@@ -684,7 +747,7 @@ class KanbanOrchestrator:
         self._quarantine_worker_graph_expansion(spec, store, mapping)
         wave = max(1, int(spec.concurrency or 1))
         child_ids = list(mapping.get("child_task_ids") or [])
-        result = self._dispatch_tick(wave, child_ids)
+        result = self._dispatch_tick(wave, child_ids, max_in_progress=wave)
         store.append_event(
             spec.run_id,
             "run.detached",
@@ -726,7 +789,10 @@ class KanbanOrchestrator:
             and not declared_terminal
             and live_running < wave
         ):
-            self._dispatch_tick(wave, child_ids)
+            remaining = max(0, wave - live_running)
+            self._dispatch_tick(
+                remaining, child_ids, max_in_progress=wave
+            )
             statuses = self._statuses(child_ids)
             self._reconcile_leases(child_ids, statuses)
 
@@ -1152,7 +1218,13 @@ class KanbanOrchestrator:
             # reconciliation and may reclaim/replace it on this tick.
         return len(active)
 
-    def _dispatch_tick(self, wave: int, allowed_task_ids: list[str]) -> dict:
+    def _dispatch_tick(
+        self,
+        max_spawn: int,
+        allowed_task_ids: list[str],
+        *,
+        max_in_progress: int | None = None,
+    ) -> dict:
         from hca.kanban import dispatch_tick
         from hca.tmux import TmuxManager
 
@@ -1161,7 +1233,12 @@ class KanbanOrchestrator:
             self.cfg,
             self.state,
             tmux,
-            max_spawn=wave,
+            max_spawn=max(0, int(max_spawn)),
+            max_in_progress=(
+                max(1, int(max_in_progress))
+                if max_in_progress is not None
+                else max(1, int(max_spawn))
+            ),
             allowed_task_ids=set(allowed_task_ids),
             max_in_progress_per_profile=1,
             skip_sole_dispatcher_check=not self.enforce_sole_dispatcher,
@@ -1274,20 +1351,35 @@ class KanbanOrchestrator:
                     if status == "done" and run_outcome == "completed"
                     else ""
                 )
+                evidence_status = status
+                block_reason = run_summary if status == "blocked" else ""
+                artifacts = self._artifacts_for(kb, conn, tid)
+                if (
+                    status == "done"
+                    and kind in {"work", "rework"}
+                    and getattr(t, "workspace_kind", "") == "worktree"
+                ):
+                    valid, git_reason, git_artifacts = validate_git_result(t, result)
+                    if valid:
+                        artifacts.extend(git_artifacts)
+                    else:
+                        evidence_status = "failed"
+                        block_reason = git_reason
+                        result = ""
                 tasks.append(
                     TaskEvidence(
                         task_id=tid,
                         assignee=getattr(t, "assignee", "") or "",
-                        terminal_status=status,
+                        terminal_status=evidence_status,
                         run_id=run_id,
                         pid=pid,
                         result=result,
-                        artifacts=self._artifacts_for(kb, conn, tid),
+                        artifacts=artifacts,
                         is_review=is_review,
                         reviewed_by=(getattr(t, "assignee", "") or "") if is_review else "",
                         review_verdict=self._review_verdict(result) if is_review else "",
                         block_kind=getattr(t, "block_kind", "") or "",
-                        block_reason=run_summary if status == "blocked" else "",
+                        block_reason=block_reason,
                         kind=kind,
                         is_root=(kind == "final"),
                     )
@@ -1374,9 +1466,39 @@ class KanbanOrchestrator:
         row without that identity, or a process group that survives escalation,
         leaves the run visibly blocked instead of fabricating cancellation.
         """
+        return self._stop_owned_workers(
+            spec,
+            store,
+            task_reason="run cancelled by operator",
+            run_error="stopped by operator",
+            event_kind="run.cancel",
+            action="cancelled",
+        )
+
+    def expire(self, spec, store: RunStore) -> str:
+        """Stop exact worker groups because the immutable wall deadline elapsed."""
+        return self._stop_owned_workers(
+            spec,
+            store,
+            task_reason="run wall-time deadline exhausted",
+            run_error="stopped at wall-time deadline",
+            event_kind="run.deadline_cleanup",
+            action="expired",
+        )
+
+    def _stop_owned_workers(
+        self,
+        spec,
+        store: RunStore,
+        *,
+        task_reason: str,
+        run_error: str,
+        event_kind: str,
+        action: str,
+    ) -> str:
         mapping = self._mapping(store, spec.run_id)
         if not mapping:
-            return "no Kanban work to cancel"
+            return f"no Kanban work to {action}"
         board = self.board
         child_ids = list(mapping.get("child_task_ids") or [])
         root_id = mapping.get("root_task_id", "")
@@ -1407,7 +1529,7 @@ class KanbanOrchestrator:
                 continue
             stopped += 1
             self.state.mark_run_status(
-                board, rec.run_id, "cancelled", error="stopped by operator"
+                board, rec.run_id, "cancelled", error=run_error
             )
 
         kb = self._kb()
@@ -1420,7 +1542,7 @@ class KanbanOrchestrator:
                 # Ready work is always safe to block. A running task is blocked
                 # only after its exact process reached an observed outcome.
                 if status == "ready" or (status == "running" and tid not in unsafe):
-                    if kb.block_task(conn, tid, reason="run cancelled by operator"):
+                    if kb.block_task(conn, tid, reason=task_reason):
                         blocked += 1
             conn.commit()
         finally:
@@ -1436,7 +1558,7 @@ class KanbanOrchestrator:
 
         store.append_event(
             spec.run_id,
-            "run.cancel",
+            event_kind,
             f"observed {stopped} worker group(s), blocked {blocked} task(s)",
             {"outcomes": outcomes, "unsafe": unsafe},
         )
@@ -1446,7 +1568,7 @@ class KanbanOrchestrator:
                 + ", ".join(f"{tid}:{reason}" for tid, reason in unsafe.items())
             )
         return (
-            f"cancelled: observed {stopped} worker process group(s), "
+            f"{action}: observed {stopped} worker process group(s), "
             f"released {blocked} Kanban claim(s); partial work preserved"
         )
 
@@ -1524,6 +1646,8 @@ class KanbanOrchestrator:
     def _sync_questions_from_evidence(
         self, spec, store: RunStore, evidence: ExecutionEvidence
     ) -> int:
+        if spec.input_policy == "fail_closed":
+            return 0
         existing = {q.task_id for q in store.open_questions(spec.run_id) if q.task_id}
         added = 0
         for task in evidence.tasks:
@@ -1573,7 +1697,7 @@ class KanbanOrchestrator:
             # also pick it up; this immediate tick makes `respond` useful when
             # no daemon was already running. Dispatch remains reservation-first.
             try:
-                self._dispatch_tick(1, [task_id])
+                self._dispatch_tick(1, [task_id], max_in_progress=1)
             except Exception:
                 # The answer and unblock are durable. Admission/supervisor
                 # reconciliation will retry without duplicating the question.

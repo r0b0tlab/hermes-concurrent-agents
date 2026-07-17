@@ -31,7 +31,7 @@ from hca.resources import admit
 from hca.routing import Reservations, concrete_slots
 from hca.state import RunRecord, StateDB
 from hca.tmux import TmuxManager, sanitize_session_name
-from hca.worker_launch import WorkerLaunchError, build_worker_launch_spec
+from hca.worker_launch import WorkerLaunchError, build_worker_launch_spec, worker_unset_env
 
 
 def _open_kanban_conn(board: Optional[str] = None) -> sqlite3.Connection:
@@ -113,7 +113,6 @@ def pre_reserve_ready(
         return reserved
     busy = reservations.busy(state)
     active_runs = state.list_runs(status="running")
-    running = len(active_runs)
     role_counts = Counter(_role_from_profile(run.slot) for run in active_runs)
     reserved_roles: Counter[str] = Counter()
     for row in rows:
@@ -149,7 +148,7 @@ def pre_reserve_ready(
             cfg,
             state,
             credits=1.0 + len(reserved),
-            running_top_level=running + len(reserved),
+            enforce_top_level_cap=False,
         )
         if not decision.allowed:
             state.set_activity(
@@ -290,7 +289,7 @@ def make_tmux_spawn_fn(
             slot,
             spec.command(),
             env=spec.env(),
-            unset_env=["HERMES_TUI"],
+            unset_env=worker_unset_env(),
             workdir=str(workspace) if workspace else None,
             log_path=str(
                 log_path(

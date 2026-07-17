@@ -139,7 +139,12 @@ def test_two_tasks_route_to_distinct_concrete_slots(hermes_env, tmp_path):
     for c in tmux.calls:
         assert c["env"]["HERMES_KANBAN_RUN_ID"].isdigit()
         assert c["env"]["HERMES_KANBAN_BOARD"] == board
-        assert c["unset_env"] == ["HERMES_TUI"]
+        assert "HERMES_TUI" in c["unset_env"]
+        assert all(
+            key in c["unset_env"]
+            for key in os.environ
+            if key.startswith("HERMES_SESSION_")
+        )
         assert "--cli" in c["command"]
 
 

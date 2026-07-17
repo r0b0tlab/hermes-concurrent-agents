@@ -180,6 +180,7 @@ def test_run_tool_forwards_the_full_shared_contract():
         team="reviewed",
         concurrency=2,
         review_policy="always",
+        input_policy="fail_closed",
         constraints=["offline"],
         acceptance_criteria=["tests pass", "docs complete"],
         independent_criteria=True,
@@ -200,6 +201,7 @@ def test_run_tool_forwards_the_full_shared_contract():
         "team": "reviewed",
         "concurrency": 2,
         "review_policy": "always",
+        "input_policy": "fail_closed",
         "budgets": {"max_tasks": 3, "wall_seconds": 60},
         "idempotency_key": "stable",
         "detach": True,
@@ -208,3 +210,4 @@ def test_run_tool_forwards_the_full_shared_contract():
         s["name"]: s for s in all_tool_schemas()
     }["hca_team_run"]["parameters"]["properties"]
     assert set(svc.kwargs) - {"project_root"} <= set(run_properties)
+    assert run_properties["input_policy"]["enum"] == ["allow", "fail_closed"]

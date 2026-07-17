@@ -274,16 +274,7 @@ def run_controller(state_dir: str, run_id: str) -> int:
             if projection.state in {RunState.NEEDS_INPUT, RunState.STOPPING}:
                 break
             if time.time() >= deadline:
-                service.store.append_event(
-                    run_id,
-                    "run.controller_budget_exhausted",
-                    "controller wall-time budget exhausted",
-                )
-                service._safe_set(
-                    run_id,
-                    RunState.BLOCKED,
-                    "controller wall-time budget exhausted; partial evidence preserved",
-                )
+                service.expire(run_id)
                 break
             time.sleep(interval)
         return 0

@@ -60,6 +60,12 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 "review_policy": {
                     "type": "string", "enum": ["auto", "always", "never"], "default": "auto"
                 },
+                "input_policy": {
+                    "type": "string",
+                    "enum": ["allow", "fail_closed"],
+                    "default": "allow",
+                    "description": "whether unresolved worker questions pause or fail the run",
+                },
                 "constraints": {"type": "array", "items": {"type": "string"}},
                 "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
                 "independent_criteria": {

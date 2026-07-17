@@ -4,8 +4,9 @@ import time
 from pathlib import Path
 
 from hca.config import load_fleet_config
+from hca.evidence import ExecutionEvidence
 from hca.kanban_orchestrator import KanbanOrchestrator, default_planner
-from hca.run import RunBudgets, RunSpec
+from hca.run import RunBudgets, RunSpec, RunStore
 from hca.state import RunRecord, StateDB
 
 
@@ -145,10 +146,64 @@ def test_dispatch_uses_configured_tmux_socket(monkeypatch, tmp_path):
     monkeypatch.setattr("hca.kanban.dispatch_tick", fake_dispatch)
     orchestrator = KanbanOrchestrator(cfg, enforce_sole_dispatcher=False)
 
-    assert orchestrator._dispatch_tick(2, ["t-allowed"]) == {"ok": True}
+    assert orchestrator._dispatch_tick(
+        1, ["t-allowed"], max_in_progress=2
+    ) == {"ok": True}
     assert seen["socket"] == "configured-socket"
     assert seen["kwargs"]["allowed_task_ids"] == {"t-allowed"}
-    assert seen["kwargs"]["max_spawn"] == 2
+    assert seen["kwargs"]["max_spawn"] == 1
+    assert seen["kwargs"]["max_in_progress"] == 2
+
+
+def test_recovery_tick_admits_only_remaining_requested_concurrency(
+    monkeypatch, tmp_path
+):
+    cfg = load_fleet_config(model="m", state_dir=str(tmp_path / "state"))
+    orchestrator = KanbanOrchestrator(cfg, enforce_sole_dispatcher=False)
+    spec = _spec(concurrency=2, acceptance=("a", "b", "c"), independent=True)
+    mapping = {
+        "root_task_id": "root",
+        "child_task_ids": ["live", "ready-a", "ready-b"],
+        "node_kinds": {"live": "work", "ready-a": "work", "ready-b": "work"},
+        "reviewer_profile": "",
+    }
+    dispatched = []
+
+    store = RunStore(tmp_path / "runs.sqlite")
+
+    monkeypatch.setattr(orchestrator, "advance", lambda _spec, _store: mapping)
+    monkeypatch.setattr(
+        orchestrator, "_quarantine_worker_graph_expansion", lambda *_args: []
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_statuses",
+        lambda _ids: {"live": "running", "ready-a": "ready", "ready-b": "ready"},
+    )
+    monkeypatch.setattr(orchestrator, "_reconcile_leases", lambda *_args: None)
+    monkeypatch.setattr(orchestrator, "_active_wave_count", lambda *_args: 1)
+    monkeypatch.setattr(
+        orchestrator,
+        "_dispatch_tick",
+        lambda max_spawn, ids, **kwargs: dispatched.append((max_spawn, ids, kwargs)) or {},
+    )
+    monkeypatch.setattr(orchestrator, "_maybe_close_root", lambda *_args: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_evidence",
+        lambda *_args: ExecutionEvidence(root_task_id="root"),
+    )
+    monkeypatch.setattr(orchestrator, "_sync_questions_from_evidence", lambda *_args: 0)
+
+    orchestrator.tick(spec, store, dispatch=True)
+
+    assert dispatched == [
+        (
+            1,
+            ["live", "ready-a", "ready-b"],
+            {"max_in_progress": 2},
+        )
+    ]
 
 
 def test_completed_task_worker_still_consumes_wave_until_reaped(

@@ -43,8 +43,28 @@ class TmuxManager:
     def ensure_server(self) -> None:
         # start-server is a no-op if already running
         self._cmd("start-server", check=False)
+        # A tmux server retains the environment from its creator. Parent chat
+        # identity must not persist into current or future HCA worker panes.
+        self.sanitize_server_environment()
         # remain-on-exit helps inspect dead panes
         self._cmd("set-option", "-g", "remain-on-exit", "on", check=False)
+
+    def sanitize_server_environment(self) -> list[str]:
+        """Remove every retained Hermes session-identity key from this server."""
+        proc = self._cmd("show-environment", "-g", check=False)
+        removed: list[str] = []
+        if proc.returncode != 0:
+            return removed
+        for line in proc.stdout.splitlines():
+            raw = line[1:] if line.startswith("-") else line
+            key = raw.split("=", 1)[0]
+            if not key.startswith("HERMES_SESSION_"):
+                continue
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                continue
+            self._cmd("set-environment", "-g", "-u", key, check=False)
+            removed.append(key)
+        return removed
 
     def has_session(self, name: str) -> bool:
         name = sanitize_session_name(name)
