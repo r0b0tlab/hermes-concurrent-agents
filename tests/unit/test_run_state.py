@@ -48,13 +48,14 @@ def test_runspec_roundtrip():
         acceptance_criteria=("tests pass", "docs complete"),
         independent_criteria=True,
         input_policy="fail_closed",
-        budgets=RunBudgets(max_workers=2),
+        budgets=RunBudgets(max_workers=2, max_supervisor_replacements=3),
         idempotency_key="k1",
     )
     d = spec.to_dict()
     back = RunSpec.from_dict(d)
     assert back == spec
     assert back.budgets.max_workers == 2
+    assert back.budgets.max_supervisor_replacements == 3
     assert back.independent_criteria is True
     assert back.input_policy == "fail_closed"
 
@@ -65,6 +66,7 @@ def test_runspec_v1_defaults_to_no_inferred_independence():
     )
     assert legacy.independent_criteria is False
     assert legacy.input_policy == "allow"
+    assert legacy.budgets.max_supervisor_replacements == 2
     assert legacy.schema_version == 1
 
 

@@ -21,7 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
-RUN_SCHEMA_VERSION = 3
+RUN_SCHEMA_VERSION = 4
 
 
 class RunState(str, Enum):
@@ -82,6 +82,7 @@ class RunBudgets:
     wall_seconds: int = 3600
     max_turns_per_task: int = 200
     max_retries: int = 2
+    max_supervisor_replacements: int = 2
     max_review_cycles: int = 2
     max_disk_mb: int = 5000
     max_subagents: int = 0

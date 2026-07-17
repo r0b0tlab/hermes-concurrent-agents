@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import sqlite3
 import time
 from pathlib import Path
 
@@ -197,13 +200,77 @@ def test_recovery_tick_admits_only_remaining_requested_concurrency(
 
     orchestrator.tick(spec, store, dispatch=True)
 
-    assert dispatched == [
-        (
-            1,
-            ["live", "ready-a", "ready-b"],
-            {"max_in_progress": 2},
-        )
-    ]
+    assert len(dispatched) == 1
+    max_spawn, task_ids, kwargs = dispatched[0]
+    assert max_spawn == 1
+    assert task_ids == ["live", "ready-a", "ready-b"]
+    assert kwargs["max_in_progress"] == 2
+    assert kwargs["owner_run_id"] == spec.run_id
+    assert kwargs["max_supervisor_replacements"] == 2
+    assert 1 <= kwargs["remaining_wall_seconds"] <= spec.budgets.wall_seconds
+
+
+def test_late_task_runtime_is_clamped_to_remaining_run_deadline(monkeypatch, tmp_path):
+    db_path = tmp_path / "kanban.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, max_runtime_seconds INTEGER)"
+    )
+    conn.execute("INSERT INTO tasks VALUES ('late', 'ready', 3600)")
+    conn.commit()
+    conn.close()
+    cfg = load_fleet_config(model="m", state_dir=str(tmp_path / "state"))
+    orchestrator = KanbanOrchestrator(cfg, enforce_sole_dispatcher=False)
+    monkeypatch.setattr(orchestrator, "_conn", lambda: sqlite3.connect(db_path))
+
+    orchestrator._clamp_task_runtimes(["late"], 17)
+
+    verify = sqlite3.connect(db_path)
+    try:
+        value = verify.execute(
+            "SELECT max_runtime_seconds FROM tasks WHERE id = 'late'"
+        ).fetchone()[0]
+    finally:
+        verify.close()
+    assert value == 17
+
+
+def test_exact_recovery_idempotent_replay_does_not_consume_budget(monkeypatch, tmp_path):
+    cfg = load_fleet_config(model="m", state_dir=str(tmp_path / "state"))
+    orchestrator = KanbanOrchestrator(cfg, enforce_sole_dispatcher=False)
+    spec = _spec()
+    store = RunStore(tmp_path / "runs.sqlite")
+    monkeypatch.setattr(
+        orchestrator,
+        "_mapping",
+        lambda _store, _run_id: {"child_task_ids": ["task-1"]},
+    )
+    digest = hashlib.sha256(
+        f"{spec.run_id}\0task-1\0stable".encode()
+    ).hexdigest()
+    original = {
+        "task_id": "task-1",
+        "replacement_number": 1,
+        "idempotent_replay": False,
+    }
+    orchestrator.state.set_meta(
+        f"recovery_result:{digest}", json.dumps(original, sort_keys=True)
+    )
+    orchestrator.state.set_meta(
+        f"supervisor_replacements:{spec.run_id}", "1"
+    )
+
+    replay = orchestrator.recover(
+        spec,
+        store,
+        "task-1",
+        idempotency_key="stable",
+    )
+
+    assert replay == {**original, "idempotent_replay": True}
+    assert orchestrator.state.get_meta(
+        f"supervisor_replacements:{spec.run_id}"
+    ) == "1"
 
 
 def test_completed_task_worker_still_consumes_wave_until_reaped(

@@ -1,6 +1,6 @@
 """Stable, versioned JSON schemas for the HCA Hermes plugin toolset.
 
-Exactly five team tools are registered — no unrestricted command passthrough.
+Exactly six team tools are registered — no unrestricted command passthrough.
 Schemas are JSON-native and idempotency-aware; every tool result includes a
 ``remediation`` string suitable for agent reasoning. ``hca_team_stop`` is
 authorization-gated *by HCA itself* — the caller must restate the run id as
@@ -12,14 +12,15 @@ from __future__ import annotations
 
 from typing import Any
 
-TOOLSET_VERSION = "1"
+TOOLSET_VERSION = "2"
 
-# The five team tools. Keep this list closed.
+# The six team tools. Keep this list closed.
 TEAM_TOOL_NAMES = (
     "hca_team_run",
     "hca_team_status",
     "hca_team_collect",
     "hca_team_respond",
+    "hca_team_recover",
     "hca_team_stop",
 )
 
@@ -86,6 +87,10 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                         "wall_seconds": {"type": "integer", "minimum": 0},
                         "max_turns_per_task": {"type": "integer", "minimum": 0},
                         "max_retries": {"type": "integer", "minimum": 0},
+                        "max_supervisor_replacements": {
+                            "type": "integer",
+                            "minimum": 0,
+                        },
                         "max_review_cycles": {"type": "integer", "minimum": 0},
                         "max_disk_mb": {"type": "integer", "minimum": 0},
                         "max_subagents": {"type": "integer", "minimum": 0},
@@ -146,6 +151,31 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "returns": _result_shape(),
         "mutating": True,
         "approval": False,
+    },
+    "hca_team_recover": {
+        "name": "hca_team_recover",
+        "version": TOOLSET_VERSION,
+        "description": (
+            "Recover one exact HCA-owned task attempt under the run's separate "
+            "supervisor-replacement budget. Does not restart endpoints or mutate concurrency."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string"},
+                "task_id": {"type": "string"},
+                "reassign_profile": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+                "authorization": {
+                    "type": "string",
+                    "description": "must equal run_id to confirm exact process replacement",
+                },
+            },
+            "required": ["run_id", "task_id", "idempotency_key", "authorization"],
+        },
+        "returns": _result_shape(),
+        "mutating": True,
+        "approval": True,
     },
     "hca_team_stop": {
         "name": "hca_team_stop",

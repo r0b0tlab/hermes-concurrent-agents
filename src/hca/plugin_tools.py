@@ -94,6 +94,36 @@ def hca_team_respond(
     return _service(service).respond(run_id, question_id, response).to_dict()
 
 
+def hca_team_recover(
+    run_id: str = "",
+    task_id: str = "",
+    reassign_profile: str = "",
+    idempotency_key: str = "",
+    authorization: str = "",
+    *,
+    service: Optional[FleetService] = None,
+) -> dict[str, Any]:
+    if not run_id or not task_id or not idempotency_key:
+        return _invalid("recover", "run_id, task_id, and idempotency_key are required")
+    if str(authorization).strip() != str(run_id).strip():
+        return ServiceResult(
+            False,
+            EXIT_INVALID,
+            "recover",
+            run_id,
+            "authorization_required",
+            "recovery requires explicit authorization for this run",
+            f're-call hca_team_recover with authorization="{run_id}"',
+            data={"authorization_required": True},
+        ).to_dict()
+    return _service(service).recover(
+        run_id,
+        task_id,
+        reassign_profile=reassign_profile,
+        idempotency_key=idempotency_key,
+    ).to_dict()
+
+
 def hca_team_stop(
     run_id: str = "",
     authorization: str = "",
@@ -124,6 +154,7 @@ TOOL_HANDLERS = {
     "hca_team_status": hca_team_status,
     "hca_team_collect": hca_team_collect,
     "hca_team_respond": hca_team_respond,
+    "hca_team_recover": hca_team_recover,
     "hca_team_stop": hca_team_stop,
 }
 
@@ -144,7 +175,7 @@ def _runtime_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 def register_tools(ctx: Any) -> list[str]:
-    """Register the five team tools through the current Hermes context API.
+    """Register the six team tools through the current Hermes context API.
 
     ``PluginContext.register_tool`` is keyword-only in practice even though
     Python does not enforce that: ``name, toolset, schema, handler``.  A prior

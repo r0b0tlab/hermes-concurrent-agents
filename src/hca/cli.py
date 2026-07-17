@@ -209,6 +209,17 @@ def cmd_respond(args) -> int:
     return _emit_service_result(res, args.json)
 
 
+def cmd_recover(args) -> int:
+    svc = _service(args)
+    res = svc.recover(
+        args.run_id,
+        args.task_id,
+        reassign_profile=args.reassign_profile,
+        idempotency_key=args.idempotency_key,
+    )
+    return _emit_service_result(res, args.json)
+
+
 def cmd_collect(args) -> int:
     svc = _service(args)
     res = svc.collect(args.run_id)
@@ -902,6 +913,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_resp.add_argument("question_id")
     p_resp.add_argument("response")
 
+    p_recover = sp.add_parser(
+        "recover",
+        parents=[common],
+        help="Replace one exact HCA-owned task attempt within the recovery budget",
+    )
+    p_recover.add_argument("run_id")
+    p_recover.add_argument("task_id")
+    p_recover.add_argument("--reassign-profile", default="")
+    p_recover.add_argument("--idempotency-key", required=True)
+
     p_col = sp.add_parser("collect", parents=[common], help="Deterministic run result manifest")
     p_col.add_argument("run_id")
 
@@ -991,6 +1012,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "run": cmd_run,
         "run-status": cmd_run_status,
         "respond": cmd_respond,
+        "recover": cmd_recover,
         "collect": cmd_collect,
         "stop": cmd_stop,
     }

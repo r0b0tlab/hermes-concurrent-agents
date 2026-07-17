@@ -1,10 +1,11 @@
 """Slot picking must never hand out a busy slot (respawn kills the worker)."""
 
 import time
+import sqlite3
 from pathlib import Path
 
 from hca.config import load_fleet_config
-from hca.kanban import pick_idle_slot
+from hca.kanban import _reconcile_owned_worker_identities, pick_idle_slot
 from hca.state import RunRecord, StateDB
 
 
@@ -56,3 +57,83 @@ def test_pick_idle_slot_round_robins(tmp_path: Path):
     a = pick_idle_slot(cfg, state, cursors, "coder-worker")
     b = pick_idle_slot(cfg, state, cursors, "coder-worker")
     assert {a, b} == {"hca-gb10-coder-01", "hca-gb10-coder-02"}
+
+
+def test_supervisor_replacement_budget_is_separate_and_bounded(tmp_path: Path):
+    cfg = load_fleet_config(model="m", state_dir=str(tmp_path))
+    state = StateDB(tmp_path / "hca.sqlite")
+    blocked = []
+    reclaimed = []
+
+    class KB:
+        @staticmethod
+        def reclaim_task(_conn, _task_id, **_kwargs):
+            reclaimed.append(_task_id)
+            return True
+
+        @staticmethod
+        def block_task(_conn, task_id, *, reason):
+            blocked.append((task_id, reason))
+            return True
+
+    def dead(task_id: str, run_id: str, slot: str):
+        now = time.time()
+        state.upsert_run(
+            RunRecord(
+                board=cfg.board,
+                task_id=task_id,
+                run_id=run_id,
+                slot=slot,
+                node="local",
+                tmux_session=slot,
+                pid=999_999,
+                hermes_session_id=None,
+                workspace=None,
+                status="running",
+                started_at=now,
+                updated_at=now,
+                last_activity="spawned",
+                error=None,
+                pid_start_ticks=1,
+            )
+        )
+
+    conn = sqlite3.connect(":memory:")
+    dead("other-run-task", "99", "slot-other")
+    dead("task-1", "1", "slot-1")
+    _reconcile_owned_worker_identities(
+        KB,
+        conn,
+        cfg,
+        state,
+        owner_run_id="run-owner",
+        max_supervisor_replacements=1,
+        allowed_task_ids={"task-1"},
+    )
+    assert state.get_meta("supervisor_replacements:run-owner") == "1"
+    assert blocked == []
+    assert reclaimed == ["task-1"]
+    other = state.latest_run_for_task(cfg.board, "other-run-task")
+    assert other is not None and other.status == "running"
+
+    dead("task-2", "2", "slot-2")
+    _reconcile_owned_worker_identities(
+        KB,
+        conn,
+        cfg,
+        state,
+        owner_run_id="run-owner",
+        max_supervisor_replacements=1,
+        allowed_task_ids={"task-2"},
+    )
+    conn.close()
+
+    assert state.get_meta("supervisor_replacements:run-owner") == "1"
+    assert blocked and blocked[0][0] == "task-2"
+    assert "budget exhausted" in blocked[0][1]
+    activities = state.recent_activity(20)
+    assert any(
+        row["kind"] == "attempt.terminated"
+        and row["data"]["termination_class"] == "worker_crash"
+        for row in activities
+    )

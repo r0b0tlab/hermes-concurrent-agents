@@ -701,6 +701,90 @@ class FleetService:
             )
         return self._status_result("respond", proj, message=f"recorded answer to {question_id}")
 
+    # --- exact recovery ---
+
+    def recover(
+        self,
+        run_id: str,
+        task_id: str,
+        *,
+        reassign_profile: str = "",
+        idempotency_key: str = "",
+    ) -> ServiceResult:
+        proj = self.store.get_run(run_id)
+        spec = self.store.get_spec(run_id)
+        if proj is None or spec is None:
+            return ServiceResult(
+                False, EXIT_INVALID, "recover", run_id, "unknown",
+                f"unknown run {run_id}",
+            )
+        if not task_id or not idempotency_key:
+            return ServiceResult(
+                False,
+                EXIT_INVALID,
+                "recover",
+                run_id,
+                proj.state.value,
+                "task_id and idempotency_key are required",
+            )
+        recover_fn = getattr(self.orchestrator, "recover", None)
+        if not callable(recover_fn):
+            return ServiceResult(
+                False,
+                EXIT_PREFLIGHT,
+                "recover",
+                run_id,
+                proj.state.value,
+                "selected execution backend does not support exact recovery",
+            )
+        controller_paused = False
+        if self._controller_enabled and self._detached_requested(run_id):
+            try:
+                from hca.controller import stop_controller
+
+                controller_paused = stop_controller(self.cfg.state_dir, run_id)
+            except Exception:
+                controller_paused = False
+        try:
+            recovery = recover_fn(
+                spec,
+                self.store,
+                task_id,
+                reassign_profile=reassign_profile,
+                idempotency_key=idempotency_key,
+            )
+            reconciled = self.reconcile(run_id, dispatch=True)
+            refreshed = self.store.get_run(run_id) or proj
+            return ServiceResult(
+                True,
+                EXIT_OK,
+                "recover",
+                run_id,
+                refreshed.state.value,
+                f"exact recovery accepted for task {task_id}",
+                data={
+                    "recovery": recovery,
+                    "controller_paused": controller_paused,
+                    "reconciled_state": reconciled.state,
+                },
+            )
+        except ValueError as exc:
+            return ServiceResult(
+                False, EXIT_INVALID, "recover", run_id, proj.state.value, str(exc)
+            )
+        except RuntimeError as exc:
+            return ServiceResult(
+                False,
+                EXIT_BLOCKED,
+                "recover",
+                run_id,
+                proj.state.value,
+                str(exc),
+                "inspect exact task ownership, process identity, and recovery budget",
+            )
+        finally:
+            self._ensure_controller(run_id, fail_closed=True)
+
     # --- collect ---
 
     def collect(self, run_id: str) -> ServiceResult:

@@ -34,6 +34,8 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 import re
+import hashlib
+import json
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -675,7 +677,12 @@ class KanbanOrchestrator:
                 remaining = max(0, wave - active_wave)
                 if remaining:
                     self._dispatch_tick(
-                        remaining, child_ids, max_in_progress=wave
+                        remaining,
+                        child_ids,
+                        max_in_progress=wave,
+                        owner_run_id=spec.run_id,
+                        max_supervisor_replacements=spec.budgets.max_supervisor_replacements,
+                        remaining_wall_seconds=self._remaining_wall_seconds(spec),
                     )
                     statuses = self._statuses(child_ids)
             except HermesCompatError as exc:
@@ -747,7 +754,14 @@ class KanbanOrchestrator:
         self._quarantine_worker_graph_expansion(spec, store, mapping)
         wave = max(1, int(spec.concurrency or 1))
         child_ids = list(mapping.get("child_task_ids") or [])
-        result = self._dispatch_tick(wave, child_ids, max_in_progress=wave)
+        result = self._dispatch_tick(
+            wave,
+            child_ids,
+            max_in_progress=wave,
+            owner_run_id=spec.run_id,
+            max_supervisor_replacements=spec.budgets.max_supervisor_replacements,
+            remaining_wall_seconds=self._remaining_wall_seconds(spec),
+        )
         store.append_event(
             spec.run_id,
             "run.detached",
@@ -791,7 +805,12 @@ class KanbanOrchestrator:
         ):
             remaining = max(0, wave - live_running)
             self._dispatch_tick(
-                remaining, child_ids, max_in_progress=wave
+                remaining,
+                child_ids,
+                max_in_progress=wave,
+                owner_run_id=spec.run_id,
+                max_supervisor_replacements=spec.budgets.max_supervisor_replacements,
+                remaining_wall_seconds=self._remaining_wall_seconds(spec),
             )
             statuses = self._statuses(child_ids)
             self._reconcile_leases(child_ids, statuses)
@@ -1224,11 +1243,16 @@ class KanbanOrchestrator:
         allowed_task_ids: list[str],
         *,
         max_in_progress: int | None = None,
+        owner_run_id: str = "",
+        max_supervisor_replacements: int | None = None,
+        remaining_wall_seconds: int | None = None,
     ) -> dict:
         from hca.kanban import dispatch_tick
         from hca.tmux import TmuxManager
 
         tmux = self._tmux or TmuxManager(socket=self.cfg.tmux_socket)
+        if remaining_wall_seconds is not None:
+            self._clamp_task_runtimes(allowed_task_ids, remaining_wall_seconds)
         return dispatch_tick(
             self.cfg,
             self.state,
@@ -1240,9 +1264,37 @@ class KanbanOrchestrator:
                 else max(1, int(max_spawn))
             ),
             allowed_task_ids=set(allowed_task_ids),
+            owner_run_id=owner_run_id,
+            max_supervisor_replacements=max_supervisor_replacements,
             max_in_progress_per_profile=1,
             skip_sole_dispatcher_check=not self.enforce_sole_dispatcher,
         )
+
+    @staticmethod
+    def _remaining_wall_seconds(spec) -> int:
+        deadline = float(spec.created_at) + max(1, int(spec.budgets.wall_seconds))
+        return max(1, int(deadline - time.time()))
+
+    def _clamp_task_runtimes(
+        self, task_ids: list[str], remaining_wall_seconds: int
+    ) -> None:
+        """Clamp unstarted task watchdogs to the immutable high-level deadline."""
+        if not task_ids:
+            return
+        remaining = max(1, int(remaining_wall_seconds))
+        conn = self._conn()
+        try:
+            placeholders = ",".join("?" for _ in task_ids)
+            conn.execute(
+                "UPDATE tasks SET max_runtime_seconds = CASE "
+                "WHEN max_runtime_seconds IS NULL OR max_runtime_seconds > ? THEN ? "
+                "ELSE max_runtime_seconds END "
+                f"WHERE id IN ({placeholders}) AND status IN ('todo', 'ready', 'blocked')",
+                (remaining, remaining, *task_ids),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def _statuses(self, task_ids: list[str]) -> dict[str, str]:
         if not task_ids:
@@ -1458,6 +1510,132 @@ class KanbanOrchestrator:
         return arts
 
     # -- cancellation ------------------------------------------------------
+
+    def recover(
+        self,
+        spec,
+        store: RunStore,
+        task_id: str,
+        *,
+        reassign_profile: str = "",
+        idempotency_key: str,
+    ) -> dict:
+        """Reclaim one exact owned attempt without consuming task retries."""
+        if not idempotency_key:
+            raise ValueError("recovery idempotency_key is required")
+        mapping = self._mapping(store, spec.run_id)
+        child_ids = set((mapping or {}).get("child_task_ids") or [])
+        if task_id not in child_ids:
+            raise ValueError(f"task {task_id} is not owned by run {spec.run_id}")
+        digest = hashlib.sha256(
+            f"{spec.run_id}\0{task_id}\0{idempotency_key}".encode()
+        ).hexdigest()
+        replay_key = f"recovery_result:{digest}"
+        cached = self.state.get_meta(replay_key, "")
+        if cached:
+            replay = json.loads(cached)
+            replay["idempotent_replay"] = True
+            return replay
+
+        from hca.routing import concrete_slots
+
+        valid_profiles = {slot.profile for slot in concrete_slots(self.cfg)}
+        if reassign_profile and reassign_profile not in valid_profiles:
+            raise ValueError(
+                f"reassign profile {reassign_profile!r} is not an existing fleet slot"
+            )
+        budget_key = f"supervisor_replacements:{spec.run_id}"
+        used = int(self.state.get_meta(budget_key, "0") or "0")
+        limit = max(0, int(spec.budgets.max_supervisor_replacements))
+        if used >= limit:
+            raise RuntimeError(f"supervisor replacement budget exhausted ({used}/{limit})")
+
+        rec = self.state.latest_run_for_task(self.board, task_id)
+        if rec is None or rec.status != "running":
+            raise RuntimeError(f"task {task_id} has no active HCA-owned attempt to recover")
+        self.state.set_activity(
+            kind="recovery.requested",
+            message=f"exact supervisor replacement requested for {task_id}",
+            board=self.board,
+            task_id=task_id,
+            run_id=rec.run_id,
+            slot=rec.slot,
+            data={
+                "owner_run_id": spec.run_id,
+                "termination_class": "supervisor_replace",
+                "old_profile": rec.slot,
+                "new_profile": reassign_profile or rec.slot,
+            },
+        )
+        outcome = self._terminate_process_group(
+            rec.pid,
+            expected_start_ticks=rec.pid_start_ticks,
+        )
+        if outcome in {"no_pid", "identity_unverified", "survived_escalation"}:
+            raise RuntimeError(f"exact recovery refused: {outcome}")
+
+        def already_gone(_pid: int, _signal: int) -> None:
+            raise ProcessLookupError
+
+        kb = self._kb()
+        conn = self._conn()
+        try:
+            task = kb.get_task(conn, task_id)
+            if task is None or getattr(task, "session_id", None) != spec.run_id:
+                raise ValueError(f"task {task_id} no longer belongs to run {spec.run_id}")
+            if not kb.reclaim_task(
+                conn,
+                task_id,
+                reason="HCA exact supervisor replacement",
+                signal_fn=already_gone,
+            ):
+                raise RuntimeError(f"task {task_id} was not reclaimable")
+            if reassign_profile and not kb.assign_task(conn, task_id, reassign_profile):
+                raise RuntimeError(f"could not reassign {task_id} to {reassign_profile}")
+            conn.commit()
+        finally:
+            conn.close()
+
+        from hca.leases import release_worker_lease
+
+        self.state.mark_run_status(
+            self.board,
+            rec.run_id,
+            "supervisor_replaced",
+            error="exact HCA supervisor replacement",
+        )
+        release_worker_lease(self.state, board=self.board, task_id=task_id)
+        self.state.release_leases_by_owner(task_id, kind="subagent")
+        used += 1
+        self.state.set_meta(budget_key, str(used))
+        result = {
+            "task_id": task_id,
+            "old_profile": rec.slot,
+            "new_profile": reassign_profile or rec.slot,
+            "old_attempt_run_id": rec.run_id,
+            "termination": outcome,
+            "replacement_number": used,
+            "replacement_limit": limit,
+            "workspace": rec.workspace or "",
+            "idempotent_replay": False,
+        }
+        self.state.set_meta(replay_key, json.dumps(result, sort_keys=True))
+        self.state.set_activity(
+            kind="recovery.completed",
+            message=f"exact supervisor replacement completed for {task_id}",
+            board=self.board,
+            task_id=task_id,
+            run_id=rec.run_id,
+            slot=reassign_profile or rec.slot,
+            data={**result, "owner_run_id": spec.run_id},
+        )
+        store.append_event(
+            spec.run_id,
+            "run.recovery",
+            f"recovered exact task attempt {task_id}",
+            result,
+        )
+        return result
 
     def cancel(self, spec, store: RunStore) -> str:
         """Stop exact worker groups and block their upstream branches.
@@ -1697,7 +1875,14 @@ class KanbanOrchestrator:
             # also pick it up; this immediate tick makes `respond` useful when
             # no daemon was already running. Dispatch remains reservation-first.
             try:
-                self._dispatch_tick(1, [task_id], max_in_progress=1)
+                self._dispatch_tick(
+                    1,
+                    [task_id],
+                    max_in_progress=max(1, int(spec.concurrency or 1)),
+                    owner_run_id=spec.run_id,
+                    max_supervisor_replacements=spec.budgets.max_supervisor_replacements,
+                    remaining_wall_seconds=self._remaining_wall_seconds(spec),
+                )
             except Exception:
                 # The answer and unblock are durable. Admission/supervisor
                 # reconciliation will retry without duplicating the question.

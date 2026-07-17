@@ -9,6 +9,7 @@ from hca.plugin import on_pre_tool_call
 from hca.plugin_schemas import TEAM_TOOL_NAMES, all_tool_schemas
 from hca.plugin_tools import (
     hca_team_collect,
+    hca_team_recover,
     hca_team_respond,
     hca_team_run,
     hca_team_status,
@@ -58,13 +59,14 @@ def _svc(tmp_path, orch):
     return FleetService(cfg, orchestrator=orch)
 
 
-def test_only_five_team_tools_registered():
+def test_only_six_team_tools_registered():
     schemas = all_tool_schemas()
     assert [s["name"] for s in schemas] == list(TEAM_TOOL_NAMES)
-    assert len(TEAM_TOOL_NAMES) == 5
-    # exactly the stop tool is approval-gated
+    assert len(TEAM_TOOL_NAMES) == 6
+    # Exact process replacement and stop are approval-gated.
     approvals = {s["name"]: s["approval"] for s in schemas}
     assert approvals["hca_team_stop"] is True
+    assert approvals["hca_team_recover"] is True
     assert approvals["hca_team_run"] is False
 
 
@@ -139,6 +141,55 @@ def test_stop_hook_requests_real_hermes_approval_directive():
     assert on_pre_tool_call("hca_team_stop", {})["action"] == "block"
 
 
+def test_recover_tool_authorization_forwarding_and_approval():
+    class RecordingService(FleetService):
+        def __init__(self):
+            self.call = None
+
+        def recover(self, run_id, task_id, **kwargs):
+            self.call = (run_id, task_id, kwargs)
+            return ServiceResult(True, 0, "recover", run_id, "running", "accepted")
+
+    svc = RecordingService()
+    denied = hca_team_recover(
+        "run-123",
+        "task-456",
+        idempotency_key="stable",
+        service=svc,
+    )
+    assert denied["data"]["authorization_required"] is True
+    assert svc.call is None
+
+    accepted = hca_team_recover(
+        "run-123",
+        "task-456",
+        reassign_profile="hca-f-coder-02",
+        idempotency_key="stable",
+        authorization="run-123",
+        service=svc,
+    )
+    assert accepted["ok"] is True
+    assert svc.call == (
+        "run-123",
+        "task-456",
+        {
+            "reassign_profile": "hca-f-coder-02",
+            "idempotency_key": "stable",
+        },
+    )
+    directive = on_pre_tool_call(
+        "hca_team_recover",
+        {"run_id": "run-123", "task_id": "task-456"},
+    )
+    assert directive is not None
+    assert directive == {
+        "action": "approve",
+        "message": "Replace exact HCA task attempt task-456 in run run-123?",
+        "rule_key": "hca_team_recover:run-123:task-456",
+    }
+    assert on_pre_tool_call("hca_team_recover", {})["action"] == "block"
+
+
 def test_status_tool_lists_and_targets(tmp_path):
     svc = _svc(tmp_path, Completing())
     r = hca_team_run("g1", service=svc)
@@ -153,6 +204,7 @@ def test_tool_missing_required_args(tmp_path):
     assert hca_team_run("", service=svc)["code"] == 2
     assert hca_team_collect("", service=svc)["code"] == 2
     assert hca_team_respond("", "", "", service=svc)["code"] == 2
+    assert hca_team_recover("", "", service=svc)["code"] == 2
     assert hca_team_stop("", service=svc)["code"] == 2
 
 

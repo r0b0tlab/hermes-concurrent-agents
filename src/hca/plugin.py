@@ -63,6 +63,19 @@ def _parent_owner() -> str:
 
 
 def on_pre_tool_call(tool_name: str, args: dict, **kwargs) -> Optional[dict]:
+    if tool_name == "hca_team_recover":
+        run_id = str((args or {}).get("run_id", "")).strip()
+        task_id = str((args or {}).get("task_id", "")).strip()
+        if not run_id or not task_id:
+            return {
+                "action": "block",
+                "message": "run_id and task_id are required to recover an attempt",
+            }
+        return {
+            "action": "approve",
+            "message": f"Replace exact HCA task attempt {task_id} in run {run_id}?",
+            "rule_key": f"hca_team_recover:{run_id}:{task_id}",
+        }
     if tool_name == "hca_team_stop":
         run_id = str((args or {}).get("run_id", "")).strip()
         if not run_id:

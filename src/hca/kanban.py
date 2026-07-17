@@ -167,7 +167,14 @@ def pre_reserve_ready(
 
 
 def _reconcile_owned_worker_identities(
-    kb: Any, conn: sqlite3.Connection, cfg: FleetConfig, state: StateDB
+    kb: Any,
+    conn: sqlite3.Connection,
+    cfg: FleetConfig,
+    state: StateDB,
+    *,
+    owner_run_id: str = "",
+    max_supervisor_replacements: Optional[int] = None,
+    allowed_task_ids: Optional[set[str]] = None,
 ) -> list[str]:
     """Reclaim dead or PID-reused exact workers before admission and claim."""
 
@@ -180,6 +187,8 @@ def _reconcile_owned_worker_identities(
 
     for rec in state.list_runs(status="running"):
         if rec.board != cfg.board:
+            continue
+        if owner_run_id and allowed_task_ids is not None and rec.task_id not in allowed_task_ids:
             continue
         current_ticks = proc_start_ticks(rec.pid) if rec.pid else None
         if rec.pid_start_ticks is None and current_ticks is not None:
@@ -205,6 +214,59 @@ def _reconcile_owned_worker_identities(
         )
         if not did_reclaim:
             continue
+        replacement_key = f"supervisor_replacements:{owner_run_id}"
+        replacements = (
+            int(state.get_meta(replacement_key, "0") or "0")
+            if owner_run_id
+            else 0
+        )
+        replacement_allowed = (
+            not owner_run_id
+            or max_supervisor_replacements is None
+            or replacements < max(0, int(max_supervisor_replacements))
+        )
+        if replacement_allowed and owner_run_id:
+            replacements += 1
+            state.set_meta(replacement_key, str(replacements))
+            state.set_activity(
+                kind="recovery.supervisor_replace",
+                message=(
+                    f"reserved supervisor replacement {replacements}/"
+                    f"{max_supervisor_replacements} for {rec.task_id}"
+                ),
+                board=rec.board,
+                task_id=rec.task_id,
+                run_id=rec.run_id,
+                slot=rec.slot,
+                data={
+                    "owner_run_id": owner_run_id,
+                    "termination_class": "supervisor_replace",
+                    "replacement_number": replacements,
+                },
+            )
+        elif owner_run_id:
+            kb.block_task(
+                conn,
+                rec.task_id,
+                reason=(
+                    "HCA supervisor replacement budget exhausted "
+                    f"({replacements}/{max_supervisor_replacements})"
+                ),
+            )
+            conn.commit()
+            state.set_activity(
+                kind="recovery.budget_exhausted",
+                message=f"replacement budget exhausted for {rec.task_id}",
+                board=rec.board,
+                task_id=rec.task_id,
+                run_id=rec.run_id,
+                slot=rec.slot,
+                data={
+                    "owner_run_id": owner_run_id,
+                    "termination_class": "worker_crash",
+                    "replacements_used": replacements,
+                },
+            )
         state.mark_run_status(
             rec.board,
             rec.run_id,
@@ -214,12 +276,17 @@ def _reconcile_owned_worker_identities(
         release_worker_lease(state, board=rec.board, task_id=rec.task_id)
         state.release_leases_by_owner(rec.task_id, kind="subagent")
         state.set_activity(
-            kind="run.crashed",
+            kind="attempt.terminated",
             message=f"reclaimed dead worker {rec.run_id} pid={rec.pid}",
             board=rec.board,
             task_id=rec.task_id,
             run_id=rec.run_id,
             slot=rec.slot,
+            data={
+                "owner_run_id": owner_run_id,
+                "termination_class": "worker_crash",
+                "replacement_allowed": replacement_allowed,
+            },
         )
         reclaimed.append(rec.task_id)
     return reclaimed
@@ -411,7 +478,15 @@ def dispatch_tick(
             if raw_allowed is not None
             else None
         )
-        pre_crashed = _reconcile_owned_worker_identities(kb, conn, cfg, state)
+        pre_crashed = _reconcile_owned_worker_identities(
+            kb,
+            conn,
+            cfg,
+            state,
+            owner_run_id=str(kwargs.get("owner_run_id") or ""),
+            max_supervisor_replacements=kwargs.get("max_supervisor_replacements"),
+            allowed_task_ids=allowed_task_ids,
+        )
         reservations = Reservations()
         # dispatch_once promotes todo/blocked → ready *internally*; run the
         # same idempotent promotion first so HCA can see and pre-reserve the
