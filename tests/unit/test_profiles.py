@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import stat
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -69,6 +70,22 @@ def test_role_toolsets_are_explicit_and_least_privilege(role, expected):
         "delegation",
         "fleet",
     } & set(actual)
+
+
+@pytest.mark.parametrize("template", ["general-worker", "coder-worker"])
+def test_file_writing_profiles_pin_git_result_protocol(template):
+    soul = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "hca"
+        / "templates"
+        / "profiles"
+        / template
+        / "SOUL.md"
+    ).read_text(encoding="utf-8")
+    assert "kanban_complete" in soul
+    assert "git rev-parse HEAD" in soul
+    assert "HCA_RESULT_COMMIT: <40-hex-commit>" in soul
 
 
 def test_failed_profile_tightening_restores_original_config(monkeypatch, tmp_path):

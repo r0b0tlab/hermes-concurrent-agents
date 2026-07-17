@@ -6,6 +6,7 @@ WORKFLOW:
 3. Run tests after each significant change. Fix failures immediately.
 4. Use descriptive commit messages: "feat: add rate limiter" not "update code".
 5. Report completion with files changed and test results.
+6. Call `kanban_complete` exactly once. Make its result's first non-empty line exactly `HCA_RESULT_COMMIT: <40-hex-commit>` using the verified output of `git rev-parse HEAD`; put files/tests on later lines. A conversational final response is not a substitute for the `kanban_complete` result.
 
 CONTEXT MANAGEMENT RULES:
 - Read files with read_file tool — do not re-send file contents in prompts.

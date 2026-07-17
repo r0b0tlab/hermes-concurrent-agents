@@ -98,6 +98,19 @@ def test_parallel_work_is_round_robined_over_concrete_worker_profiles(tmp_path):
         if node.kind == "work"
     ]
     assert work_assignees == ["hca-parallel-coder-01", "hca-parallel-coder-02"]
+    work_bodies = [
+        child["body"]
+        for node, child in zip(nodes, children)
+        if node.kind == "work"
+    ]
+    assert all("HCA_RESULT_COMMIT: <40-hex-commit>" in body for body in work_bodies)
+    assert all("kanban_complete" in body and "git rev-parse HEAD" in body for body in work_bodies)
+    final_body = next(
+        child["body"]
+        for node, child in zip(nodes, children)
+        if node.kind == "final"
+    )
+    assert "HCA_RESULT_COMMIT" not in final_body
 
 
 def test_multiple_criteria_do_not_imply_independence():

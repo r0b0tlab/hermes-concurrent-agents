@@ -592,12 +592,24 @@ class KanbanOrchestrator:
             )
             if is_execution:
                 worker_index += 1
+            completion_protocol = ""
+            if is_execution:
+                completion_protocol = (
+                    "\n\ncompletion protocol: If this task changes files in a Git "
+                    "worktree, commit the accepted changes, verify the exact commit "
+                    "with `git rev-parse HEAD`, and call `kanban_complete` with a "
+                    "result whose first non-empty line is exactly "
+                    "`HCA_RESULT_COMMIT: <40-hex-commit>`. Put verification details "
+                    "on later lines. The conversational final response does not "
+                    "replace the `kanban_complete` result."
+                )
             children.append(
                 {
                     "title": n.title,
                     "body": (
                         f"{n.scope}\n\nacceptance: "
                         f"{'; '.join(n.acceptance_criteria) or 'n/a'}"
+                        f"{completion_protocol}"
                     ),
                     "assignee": assignee,
                     "parents": parents,
