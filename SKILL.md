@@ -1,7 +1,7 @@
 ---
 name: hermes-concurrent-agents
 description: Supervise bounded Hermes teams on one host.
-version: 2.0.1
+version: 2.0.2
 ---
 
 # hermes-concurrent-agents

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import importlib.util
 from pathlib import Path
 
 
@@ -70,3 +71,19 @@ def test_orchestration_acceptance_records_exact_source_provenance():
     assert '"git_tree": _git_object(root, "HEAD^{tree}")' in text
     assert '"hermes_contract_commit": _git_object(hermes_src, "HEAD")' in text
     assert '"hermes_contract_tree": _git_object(hermes_src, "HEAD^{tree}")' in text
+
+
+def test_orchestration_acceptance_honors_pinned_source_environment(monkeypatch, tmp_path):
+    script = ROOT / "scripts" / "run-orchestration-acceptance.py"
+    spec = importlib.util.spec_from_file_location("hca_acceptance_script", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    pinned = tmp_path / "pinned-hermes"
+    pinned.mkdir()
+    monkeypatch.setenv("HCA_HERMES_SRC", str(pinned))
+
+    assert module._resolve_hermes_source("") == pinned.resolve()
+    explicit = tmp_path / "explicit-hermes"
+    explicit.mkdir()
+    assert module._resolve_hermes_source(str(explicit)) == explicit.resolve()

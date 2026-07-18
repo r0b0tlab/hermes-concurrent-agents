@@ -28,6 +28,15 @@ CHECKS = (
 )
 
 
+def _resolve_hermes_source(cli_value: str) -> Path:
+    configured = (
+        cli_value
+        or os.environ.get("HCA_HERMES_SRC", "")
+        or str(Path.home() / ".hermes" / "hermes-agent")
+    )
+    return Path(configured).expanduser().resolve()
+
+
 def _git_object(root: Path, object_name: str) -> str:
     result = subprocess.run(
         ["git", "rev-parse", "--verify", object_name],
@@ -44,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="", help="JSON report path")
     parser.add_argument(
         "--hermes-src",
-        default=str(Path.home() / ".hermes" / "hermes-agent"),
+        default="",
         help="Hermes source tree whose real Kanban contract is exercised",
     )
     args = parser.parse_args(argv)
@@ -54,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(args.out).expanduser() if args.out else root / ".hermes" / "acceptance" / f"orchestration-{stamp}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    hermes_src = Path(args.hermes_src).expanduser().resolve()
+    hermes_src = _resolve_hermes_source(args.hermes_src)
     env = os.environ.copy()
     env["HCA_HERMES_SRC"] = str(hermes_src)
     started = time.perf_counter()

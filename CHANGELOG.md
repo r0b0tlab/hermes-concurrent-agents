@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.2 - 2026-07-18
+
+### Fixed
+- The deterministic acceptance runner now honors the workflow-pinned
+  `HCA_HERMES_SRC` checkout when `--hermes-src` is omitted, so CI records exact
+  stable-Hermes provenance instead of looking under the runner's home directory.
+
 ## 2.0.1 - 2026-07-18
 
 ### Added

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-concurrent-agents"
-version = "2.0.1"
+version = "2.0.2"
 description = "Supervised concurrent teams built on Hermes Agent Kanban and profiles"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
