@@ -77,7 +77,9 @@ _REVIEW_STATUSES = frozenset({"review"})
 _RESULT_COMMIT_RE = re.compile(r"HCA_RESULT_COMMIT: ([0-9a-f]{40}|[0-9a-f]{64})")
 
 
-def validate_git_result(task, result: str) -> tuple[bool, str, list[Artifact]]:
+def validate_git_result(
+    task, result: str, *, require_head: bool = True
+) -> tuple[bool, str, list[Artifact]]:
     """Bind a worker's claimed result to the exact recorded worktree HEAD."""
     first = next((line.strip() for line in (result or "").splitlines() if line.strip()), "")
     match = _RESULT_COMMIT_RE.fullmatch(first)
@@ -117,8 +119,23 @@ def validate_git_result(task, result: str) -> tuple[bool, str, list[Artifact]]:
         actual_root = Path(git("rev-parse", "--show-toplevel")).resolve(strict=True)
     except (OSError, subprocess.SubprocessError):
         return False, "could not resolve claimed commit tree from recorded workspace", []
-    if head != commit:
+    if require_head and head != commit:
         return False, f"claimed commit {commit} is not workspace HEAD {head}", []
+    if not require_head:
+        ancestor = subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", commit, head],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if ancestor.returncode != 0:
+            return False, f"claimed historical commit {commit} is not an ancestor of HEAD {head}", []
+    try:
+        tracked_dirty = git("status", "--porcelain", "--untracked-files=no")
+    except (OSError, subprocess.SubprocessError):
+        return False, "could not verify tracked workspace cleanliness", []
+    if tracked_dirty:
+        return False, "recorded project workspace has uncommitted tracked changes", []
     if actual_root != root:
         return False, "recorded workspace_path is not the Git worktree root", []
     return (
@@ -370,6 +387,42 @@ class KanbanOrchestrator:
                 "isolated worktrees"
             )
         repo_root = Path(proc.stdout.strip()).resolve()
+        common = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if common.returncode != 0:
+            raise ValueError(f"could not resolve Git common directory for {repo_root}")
+        common_path = Path(common.stdout.strip())
+        if not common_path.is_absolute():
+            common_path = repo_root / common_path
+        common_path = common_path.resolve()
+        # When the submitted project is itself a linked worktree, anchor child
+        # materialization on the primary checkout.  Passing the linked path to
+        # Hermes would cause it to reuse that canonical checkout directly.
+        git_dir = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--absolute-git-dir"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if git_dir.returncode != 0:
+            raise ValueError(f"could not resolve Git directory for {repo_root}")
+        if Path(git_dir.stdout.strip()).resolve() != common_path:
+            primary = common_path.parent
+            primary_top = subprocess.run(
+                ["git", "-C", str(primary), "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if primary_top.returncode != 0:
+                raise ValueError(
+                    f"linked project {repo_root} has no verifiable primary checkout"
+                )
+            repo_root = Path(primary_top.stdout.strip()).resolve()
         return "worktree", str(repo_root)
 
     def _apply_child_metadata(self, conn, child_ids, nodes, spec) -> None:
@@ -1472,20 +1525,10 @@ class KanbanOrchestrator:
                     if latest_upstream_run is not None
                     else ""
                 )
-                run_outcome = (
-                    getattr(latest_upstream_run, "outcome", "") or ""
-                    if latest_upstream_run is not None
-                    else ""
-                )
-                # Upstream Hermes documents task_runs.summary as the structured
-                # handoff consumed by downstream workers. A successful summary
-                # is durable result evidence when the optional task.result field
-                # is empty; failed/blocked attempt summaries never qualify.
-                result = task_result or (
-                    run_summary
-                    if status == "done" and run_outcome == "completed"
-                    else ""
-                )
+                # task.result is the authoritative structured worker handoff.
+                # Attempt summaries remain diagnostics and cannot authenticate
+                # an otherwise empty terminal task.
+                result = task_result
                 evidence_status = status
                 block_reason = run_summary if status == "blocked" else ""
                 artifacts = self._artifacts_for(kb, conn, tid)
@@ -1494,7 +1537,19 @@ class KanbanOrchestrator:
                     and kind in {"work", "rework"}
                     and getattr(t, "workspace_kind", "") == "worktree"
                 ):
-                    valid, git_reason, git_artifacts = validate_git_result(t, result)
+                    later_code_task_same_workspace = any(
+                        later_id != tid
+                        and node_kinds.get(later_id, "") in {"work", "rework"}
+                        and (
+                            (later_task := kb.get_task(conn, later_id)) is not None
+                            and (getattr(later_task, "workspace_path", "") or "")
+                            == (getattr(t, "workspace_path", "") or "")
+                        )
+                        for later_id in child_ids[child_ids.index(tid) + 1 :]
+                    )
+                    valid, git_reason, git_artifacts = validate_git_result(
+                        t, result, require_head=not later_code_task_same_workspace
+                    )
                     if valid:
                         artifacts.extend(git_artifacts)
                     else:

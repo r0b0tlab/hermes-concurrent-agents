@@ -309,16 +309,23 @@ def cmd_down(args) -> int:
     (Path(cfg.state_dir) / "DRAIN").write_text(str(time.time()), encoding="utf-8")
     tmux = TmuxManager(cfg.tmux_socket)
     killed = []
+    retained = []
+    running = state.list_runs(status="running")
+    active_sessions = {rec.tmux_session for rec in running}
     if args.kill:
-        for rec in state.list_runs(status="running"):
+        for rec in running:
             tmux.signal_pane(rec.tmux_session, "TERM")
             state.mark_run_status(rec.board, rec.run_id, "stopped", error="hca down --kill")
             killed.append(rec.run_id)
-        if args.slots:
-            for s in tmux.list_sessions():
-                if s.startswith(f"hca-{cfg.name}-"):
-                    tmux.kill_session(s)
-                    killed.append(s)
+    if args.slots:
+        for s in tmux.list_sessions():
+            if not s.startswith(f"hca-{cfg.name}-"):
+                continue
+            if s in active_sessions and not args.kill:
+                retained.append(s)
+                continue
+            tmux.kill_session(s)
+            killed.append(s)
     state.set_activity(
         kind="fleet.down",
         message=f"down kill={args.kill} slots={args.slots} killed={len(killed)}",
@@ -329,12 +336,15 @@ def cmd_down(args) -> int:
         "kill": args.kill,
         "slots": args.slots,
         "affected": killed,
+        "retained_active_slots": retained,
     }
     _print(out, args.json)
     if not args.json:
         print(
             "fleet down (drain set)"
-            + ("; signaled running panes" if args.kill else "; slots preserved")
+            + ("; signaled running panes" if args.kill else "")
+            + ("; idle slots removed" if args.slots else "; slots preserved")
+            + (f"; retained {len(retained)} active slot(s)" if retained else "")
         )
     return 0
 
@@ -848,7 +858,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_down = sp.add_parser("down", parents=[common], help="Drain fleet; optional kill")
     p_down.add_argument("--kill", action="store_true", help="signal running worker panes")
     p_down.add_argument(
-        "--slots", action="store_true", help="with --kill, destroy warm tmux slots"
+        "--slots",
+        action="store_true",
+        help="destroy idle warm tmux slots; active slots require --kill",
     )
 
     sp.add_parser("ps", parents=[common], help="Physical slot/process view")

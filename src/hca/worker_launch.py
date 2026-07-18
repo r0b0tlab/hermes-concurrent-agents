@@ -23,8 +23,10 @@ env/argv so drift is caught, not silently absorbed.
 from __future__ import annotations
 
 import os
+import subprocess
 import shlex
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 from hca.hermes_compat import (
@@ -70,6 +72,61 @@ def resolve_hermes_argv() -> list[str]:
         except Exception:
             pass
     return [hermes_bin()]
+
+
+def attest_worker_workspace(task: Any, workspace: str) -> str:
+    """Fail closed unless a project task resolves to an HCA child worktree.
+
+    Hermes treats an existing linked worktree path as an already-materialized
+    target.  Without this guard, submitting a linked canonical checkout can
+    therefore cause a worker to run in that checkout rather than in a child
+    worktree.  HCA project workers are restricted to ``.worktrees/<task>``
+    descendants; scratch tasks retain their existing behavior.
+    """
+    root = Path(workspace).expanduser()
+    kind = str(_task_attr(task, "workspace_kind", "") or "")
+    if kind != "worktree":
+        return str(root)
+    if not root.is_absolute() or not root.is_dir():
+        raise WorkerLaunchError(
+            f"task {_task_attr(task, 'id', '')} worktree workspace must be an "
+            f"existing absolute directory: {workspace!r}"
+        )
+    root = root.resolve(strict=True)
+
+    def git(*args: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return completed.stdout.strip()
+
+    try:
+        top = Path(git("rev-parse", "--show-toplevel")).resolve(strict=True)
+        git_dir = Path(git("rev-parse", "--absolute-git-dir")).resolve(strict=True)
+        common_raw = Path(git("rev-parse", "--git-common-dir"))
+        common_dir = (
+            common_raw if common_raw.is_absolute() else root / common_raw
+        ).resolve(strict=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise WorkerLaunchError(
+            f"task {_task_attr(task, 'id', '')} workspace is not a verifiable "
+            "Git worktree"
+        ) from exc
+    if top != root:
+        raise WorkerLaunchError("worker workspace is not the Git worktree root")
+    if git_dir == common_dir:
+        raise WorkerLaunchError(
+            "worker workspace is the primary checkout, not a linked child worktree"
+        )
+    if root.parent.name != ".worktrees":
+        raise WorkerLaunchError(
+            "worker workspace is not under the repository's .worktrees directory"
+        )
+    return str(root)
 
 
 def resolve_worker_toolsets(hermes_home: Optional[str]) -> list[str]:
@@ -295,7 +352,7 @@ def build_worker_launch_spec(
 
     abs_ws = ""
     if workspace:
-        abs_ws = str(workspace)
+        abs_ws = attest_worker_workspace(task, workspace)
 
     max_runtime = _task_attr(task, "max_runtime_seconds", None)
     tt = resolve_terminal_timeout(max_runtime, os.environ.get("TERMINAL_TIMEOUT"))

@@ -1,12 +1,17 @@
 """Slot picking must never hand out a busy slot (respawn kills the worker)."""
 
 import time
+import os
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
 from hca.config import load_fleet_config
-from hca.kanban import _reconcile_owned_worker_identities, pick_idle_slot
+from hca.kanban import (
+    _reconcile_owned_worker_identities,
+    pick_idle_slot,
+    worker_cwd_within,
+)
 from hca.state import RunRecord, StateDB
 
 
@@ -58,6 +63,14 @@ def test_pick_idle_slot_round_robins(tmp_path: Path):
     a = pick_idle_slot(cfg, state, cursors, "coder-worker")
     b = pick_idle_slot(cfg, state, cursors, "coder-worker")
     assert {a, b} == {"hca-gb10-coder-01", "hca-gb10-coder-02"}
+
+
+def test_live_pid_cwd_attestation_is_scoped_to_workspace(tmp_path: Path):
+    if not Path("/proc").is_dir():
+        return
+    cwd = Path.cwd().resolve()
+    assert worker_cwd_within(os.getpid(), str(cwd)) is True
+    assert worker_cwd_within(os.getpid(), str(tmp_path)) is False
 
 
 def test_supervisor_replacement_budget_is_separate_and_bounded(tmp_path: Path):

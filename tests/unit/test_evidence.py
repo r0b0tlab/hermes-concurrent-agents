@@ -135,7 +135,22 @@ def test_done_without_result_or_artifact_is_not_completion():
     )
     state, reason = derive_final_state(_spec(), ev)
     assert state == RunState.BLOCKED
-    assert "result or artifact" in reason.lower()
+    assert "structured result" in reason.lower()
+
+
+def test_each_done_work_task_requires_its_own_structured_result():
+    evidenced = _done_task(task_id="t1")
+    empty_sibling = _done_task(
+        task_id="t2",
+        result="",
+        artifacts=[Artifact(name="orphan", kind="kanban", ref="t2")],
+    )
+    state, reason = derive_final_state(
+        _spec(), ExecutionEvidence(root_task_id="t1", tasks=[evidenced, empty_sibling])
+    )
+    assert state == RunState.BLOCKED
+    assert "task t2" in reason
+    assert "structured result" in reason
 
 
 def test_non_terminal_projection_stays_running():

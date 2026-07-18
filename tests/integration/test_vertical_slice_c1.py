@@ -57,10 +57,9 @@ finally:
     conn.close()
 """
 
-# Real upstream completion may carry the durable text handoff in the run's
-# structured ``summary`` while leaving the task's optional ``result`` column
-# empty. Hermes downstream context treats that summary as the worker result;
-# HCA must project the same contract rather than report empty success.
+# A terminal upstream summary is diagnostic evidence, not the structured HCA
+# result contract. This worker intentionally omits task.result and must not be
+# accepted as a completed HCA run.
 _SUMMARY_ONLY_WORKER_SRC = r"""
 import os, sys, time
 sys.path.insert(0, os.environ["HCA_WORKER_HERMES_SRC"])
@@ -496,19 +495,22 @@ def test_c1_vertical_slice_completes_with_real_evidence(
     assert state.active_lease_credits() == 0.0
 
 
-def test_summary_only_upstream_handoff_is_result_evidence(
+def test_summary_only_upstream_handoff_is_not_structured_result_evidence(
     monkeypatch, tmp_path, hermes_runtime
 ):
     svc, res, _cfg, state = _run_slice(
         monkeypatch, tmp_path, hermes_runtime, _SUMMARY_ONLY_WORKER_SRC
     )
 
-    assert res.state == "completed", res.to_dict()
+    assert res.state == "blocked", res.to_dict()
     evidence = _evidence_event(svc.store, res.run_id)
     done = [task for task in evidence["tasks"] if task["terminal_status"] == "done"]
     assert done
-    assert all(task["result"].startswith("durable summary-only result") for task in done)
+    assert all(task["result"] == "" for task in done)
     assert all(not task["block_reason"] for task in done)
+    projection = svc.store.get_run(res.run_id)
+    assert projection is not None
+    assert "structured result" in projection.reason
     assert state.active_lease_credits() == 0.0
 
 

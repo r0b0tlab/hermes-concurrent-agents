@@ -42,6 +42,19 @@ def _open_kanban_conn(board: Optional[str] = None) -> sqlite3.Connection:
     return conn
 
 
+def worker_cwd_within(pid: int, workspace: str) -> Optional[bool]:
+    """Return Linux PID-CWD attestation, or ``None`` when `/proc` is unavailable."""
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return None
+    try:
+        cwd = (proc_root / str(pid) / "cwd").resolve(strict=True)
+        root = Path(workspace).resolve(strict=True)
+    except OSError:
+        return False
+    return cwd == root or root in cwd.parents
+
+
 def _concrete_profiles(cfg: FleetConfig) -> set[str]:
     return {s.profile for s in concrete_slots(cfg)}
 
@@ -438,6 +451,22 @@ def make_tmux_spawn_fn(
                 f"could not capture exact process identity for pid {pid} "
                 f"task {task_id} on slot {slot}"
             )
+        if getattr(task, "workspace_kind", "") == "worktree":
+            cwd_ok: Optional[bool] = False
+            deadline = time.monotonic() + 0.5
+            while cwd_ok is False and time.monotonic() < deadline:
+                cwd_ok = worker_cwd_within(pid, str(workspace))
+                if cwd_ok is False:
+                    time.sleep(0.01)
+            if cwd_ok is False:
+                try:
+                    tmux.kill_session(slot)
+                except Exception:
+                    pass
+                raise WorkerLaunchError(
+                    f"worker pid {pid} cwd is not inside attested task worktree "
+                    f"{workspace}"
+                )
 
         now = time.time()
         session_id = getattr(task, "session_id", None)

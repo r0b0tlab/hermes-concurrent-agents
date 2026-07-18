@@ -231,11 +231,14 @@ def derive_final_state(
             "observed for it — refusing to report unverified completion"
         )
 
-    # A success must point at something: a result string or a surviving artifact.
-    if not any(t.result or t.artifacts for t in done_work):
+    # Every successful work task must carry its own structured handoff. One
+    # sibling's artifact cannot authenticate an otherwise empty ``done`` row.
+    empty_work = [t for t in done_work if not t.result]
+    if empty_work:
+        t = empty_work[0]
         return RunState.BLOCKED, (
-            "no result or artifact was produced by any task — refusing to "
-            "report empty success"
+            f"task {t.task_id} is 'done' but has no structured result — "
+            "refusing to report empty success"
         )
 
     if review_required(spec):

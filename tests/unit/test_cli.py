@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import hca.cli as cli
 from hca.cli import build_parser, main
@@ -22,6 +23,49 @@ def test_redact():
 
 def test_main_presets_exit_zero():
     assert main(["presets"]) == 0
+
+
+def test_down_slots_is_idempotent_and_preserves_active_without_kill(
+    monkeypatch, tmp_path, capsys
+):
+    cfg = SimpleNamespace(name="fleet", state_dir=str(tmp_path), tmux_socket="sock")
+    active = SimpleNamespace(tmux_session="hca-fleet-coder-01", board="b", run_id="7")
+
+    class State:
+        def list_runs(self, status=""):
+            assert status == "running"
+            return [active]
+
+        def set_activity(self, **_kwargs):
+            return None
+
+    class Tmux:
+        sessions = ["hca-fleet-coder-01", "hca-fleet-coder-02", "foreign"]
+
+        def list_sessions(self):
+            return list(self.sessions)
+
+        def kill_session(self, name):
+            self.sessions.remove(name)
+
+        def signal_pane(self, *_args):
+            raise AssertionError("active worker must not be signalled without --kill")
+
+    tmux = Tmux()
+    monkeypatch.setattr(cli, "_cfg_from_args", lambda _args: cfg)
+    monkeypatch.setattr(cli, "_state", lambda _cfg: State())
+    monkeypatch.setattr(cli, "TmuxManager", lambda _socket: tmux)
+    args = SimpleNamespace(kill=False, slots=True, json=True)
+
+    assert cli.cmd_down(args) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["affected"] == ["hca-fleet-coder-02"]
+    assert first["retained_active_slots"] == ["hca-fleet-coder-01"]
+
+    assert cli.cmd_down(args) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["affected"] == []
+    assert second["retained_active_slots"] == ["hca-fleet-coder-01"]
 
 
 def test_inspect_json_remediates_high_level_run_identifier(tmp_path, capsys):

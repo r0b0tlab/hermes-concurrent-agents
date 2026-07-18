@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.0.1 - 2026-07-18
 
 ### Added
 - Goal-to-team product surface: `hca run/run-status/respond/collect/stop` and
@@ -68,10 +68,18 @@
   computed from hits/queries counters
 - SGLang metrics: Prometheus `/metrics` actually parsed (`token_usage`,
   `num_running_reqs`, `num_queue_reqs`)
-- Completion projection waits for exact live worker cleanup; successful
-  upstream run summaries count as result evidence while blocked summaries stay
-  blockers. Worker logs are board/task/run namespaced so board-local integer run
-  IDs cannot collide.
+- Completion projection waits for exact live worker cleanup and requires each
+  terminal task's schema-bearing `result`; attempt summaries remain diagnostics
+  and cannot authenticate an empty `done` row. Worker logs are board/task/run
+  namespaced so board-local integer run IDs cannot collide.
+- Project workers are admitted only in verified linked child worktrees beneath
+  `.worktrees`; linked canonical checkouts are re-anchored on the primary repo,
+  and Linux launches verify the live worker PID CWD before recording ownership.
+- Rework commit chains preserve historical commit/tree evidence while requiring
+  the latest accepted code task to match a clean worktree `HEAD`, so successful
+  bounded repair no longer leaves the root projection falsely failed.
+- `hca down --slots` independently removes idle warm slots, preserves active
+  workers unless `--kill` is explicit, and is safe to repeat.
 - Worker-created tasks outside the persisted HCA graph are excluded from
   dispatch, blocked, and evidenced through `run.graph_expansion_denied` without
   receiving a lease or process.
